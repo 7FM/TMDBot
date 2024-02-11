@@ -183,7 +183,7 @@ def is_in_any_watchlist(movie_id, user):
 # Define command handlers
 async def unauthorized_msg(update: Update) -> None:
     user_id = get_user_id(update)
-    await update.message.reply_text(esc(f'*Unauthorized user detected!*\nPlease contact the bot admin to whitelist your user id = `{user_id}`.\nOtherwise, consider hosting your own bot instance. The source code is publicly available at GitHub TODO insert link'), parse_mode=ParseMode.MARKDOWN_V2)
+    await update.message.reply_text(esc(f'*Unauthorized user detected!*\nPlease contact the bot admin to whitelist your user id = `{user_id}`.\nOtherwise, consider hosting your own bot instance. The source code is publicly available at [GitHub](https://github.com/7FM/TMDBot).'), parse_mode=ParseMode.MARKDOWN_V2)
 
 
 async def show_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -228,7 +228,8 @@ async def add_provider(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
 
     if not context.args:
-        movie_provider = [f'`{mp}`' for mp in get_all_movie_provider(user_data[user]["region"])]
+        movie_provider = [f'`{mp}`' for mp in get_all_movie_provider(
+            user_data[user]["region"])]
         await update.message.reply_text(esc(f'Please provide a stream service.\nHere is a list of all available services in the region {user_data[user]["region"]}:\n' + "\n".join(movie_provider)), parse_mode=ParseMode.MARKDOWN_V2)
         return
 
