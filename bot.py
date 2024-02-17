@@ -538,7 +538,7 @@ async def search_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         res = []
         for m in movies:
             res.append(extract_movie_info(m))
-        sorted_res = sort_by_popularity(res)
+        sorted_res = sort_by_rating(res)
         show_results = min(5, len(sorted_res))
         # show_results = min(10, results["total_results"])
         for _, poster_path, caption in sorted_res[:show_results]:
