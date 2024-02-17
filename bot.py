@@ -1,5 +1,8 @@
 import os
 import yaml
+import concurrent.futures
+import multiprocessing
+from collections import Counter
 from telegram import Update, MenuButtonCommands
 from telegram.ext import Application, CommandHandler, CallbackContext, ContextTypes
 from telegram.constants import ParseMode
@@ -156,7 +159,7 @@ def esc(s):
 def extract_movie_info(m):
     title = m["title"]
     poster_path = get_image_url(m['poster_path'])
-    popularity = m["popularity"] if "popularity" in m else -1
+    # popularity = m["popularity"] if "popularity" in m else -1
     rating = m["vote_average"] if "vote_average" in m and m["vote_count"] > 0 else None
     release_date = m["release_date"] if "release_date" in m and m["release_date"] != "" else None
     id = m["id"]
@@ -166,10 +169,10 @@ def extract_movie_info(m):
         title = f'[{title}]({trailer})'
     else:
         title = f'`{title}`'
-    return (popularity, poster_path, title + (" - " + release_date if release_date else "") + (" - " + (", ".join(genre)) if genre else "") + ' - ' + (str(round(rating, 1)) if rating else "?") + '/10 - id=`' + str(id) + '`')
+    return (rating if rating else 0, poster_path, title + (" - " + release_date if release_date else "") + (" - " + (", ".join(genre)) if genre else "") + ' - ' + (str(round(rating, 1)) if rating else "?") + '/10 - id=`' + str(id) + '`')
 
 
-def sort_by_popularity(movie_list):
+def sort_by_rating(movie_list):
     return sorted(movie_list, key=lambda x: x[0], reverse=True)
 
 
@@ -384,39 +387,53 @@ async def recommend(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(f'Your "{watchlist}" watchlist is empty.')
         return
 
-    message = await update.message.reply_text('THIS WILL TAKE A WHILE! Lay back and wait c:')
-    last_message_id = message.message_id
+    await update.message.reply_text('THIS WILL TAKE A WHILE! Lay back and wait c:')
 
-    recommended_movies = []
-    available_recommendations = []
-    counter = 0
-    watchlist_size = len(user_data[user]["watchlists"][watchlist])
-    for movie_id in user_data[user]["watchlists"][watchlist]:
+    def query_recommendations(movie_id):
+        available_recommendations = []
         results = movie.recommendations(movie_id)
         movies = results["results"]
-        # TODO parallelize this loop?
         for m in movies:
             in_watchlist = is_in_any_watchlist(m["id"], user)
-            if not in_watchlist and m["id"] not in user_data[user]["watched"] and m["id"] not in recommended_movies:
-                recommended_movies.append(m["id"])
+            if not in_watchlist and m["id"] not in user_data[user]["watched"]:
                 available, provider = is_available_for_free(
                     user_data[user]["providers"], m["id"], user_data[user]["region"])
                 if available:
                     popularity, poster, desc = extract_movie_info(m)
                     available_recommendations.append(
-                        (popularity, poster, desc, provider))
-        counter += 1
-        # Edit the message by sending a new message with the same chat and message ID
-        await context.bot.edit_message_text(chat_id=update.effective_chat.id,
-                                            message_id=last_message_id,
-                                            text=f'Progress: processed {counter}/{watchlist_size} watchlist movies.\nFound recommendations: {len(available_recommendations)}')
+                        (popularity, poster, desc, provider, m["id"]))
+        return available_recommendations
 
-    available_recommendations = sort_by_popularity(available_recommendations)
+    # Get the number of available CPU threads
+    num_threads = multiprocessing.cpu_count()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=num_threads) as executor:
+        # Map the function to each item in parallel
+        available_recommendations = list(executor.map(query_recommendations, user_data[user]["watchlists"][watchlist], timeout=None, chunksize=1))
+        available_recommendations = [item for sublist in available_recommendations for item in sublist]
+
+    # Count the occurrences of each ID
+    id_counts = Counter(item[-1] for item in available_recommendations)
+    def custom_sort_key(item):
+        # Custom sorting key function
+        return (-id_counts[item[-1]], -item[0])
+
+    # make the entries unique
+    unique_last_values = set()
+    unique_tuples = []
+    for tuple_item in available_recommendations:
+        if tuple_item[-1] not in unique_last_values:
+            unique_last_values.add(tuple_item[-1])
+            unique_tuples.append(tuple_item)
+
+    # Sort the list based on custom sorting key
+    available_recommendations = sorted(unique_tuples, key=custom_sort_key)
+
+    # available_recommendations = sort_by_rating(available_recommendations)
     num_rec = min(50, len(available_recommendations))
     if available_recommendations:
         await update.message.reply_text(f'Recommended movies based on your "{watchlist}" watchlist:')
         # Giving all the recommendations lol
-        for _, poster_path, caption, provider in available_recommendations[:num_rec]:
+        for _, poster_path, caption, provider, _ in available_recommendations[:num_rec]:
             provider_str = create_available_at_str(provider)
             if poster_path:
                 await update.message.reply_photo(poster_path, esc(caption + "\n" + provider_str), parse_mode=ParseMode.MARKDOWN_V2)
