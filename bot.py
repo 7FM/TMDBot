@@ -208,15 +208,15 @@ async def show_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         movies = []
         for movie_id in watchlist:
             movie_details = movie.details(movie_id)
-            _, poster, desc = extract_movie_info(movie_details)
+            _, _, desc = extract_movie_info(movie_details)
             movies.append(desc)
+        return movies
 
     reply_text = ""
     nl = "\n"
     for wn, w in user_data[user]["watchlists"].items():
-        reply_text.append(
-            f"{'' if reply_text == '' else nl + nl}{wn} watchlist:{nl}")
-        reply_text.append("\n".join(lookup_movies_in_watchlist(w)))
+        reply_text += f"{'' if reply_text == '' else nl + nl}{wn} watchlist:{nl}"
+        reply_text += "\n".join(lookup_movies_in_watchlist(w))
 
     await update.message.reply_text(esc(reply_text), parse_mode=ParseMode.MARKDOWN_V2)
 
