@@ -182,6 +182,15 @@ def is_in_any_watchlist(movie_id, user):
             return wn
     return None
 
+def is_valid_movie_id(movie_id):
+    if not movie_id.isdigit():
+        return "ID is not a number"
+    try:
+        movie.details(movie_id)
+    except:
+        return "Movie not found"
+    return None
+
 
 # Define command handlers
 async def unauthorized_msg(update: Update) -> None:
@@ -267,9 +276,9 @@ async def rm_provider(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 async def add_to_watchlist_helper(watchlist, movie_id, user, update: Update):
-    if not movie_id.isdigit():
-        await update.message.reply_text(f'The provided movie id is not a number!')
-        # TODO check that the id is actually valid! aka tmdb knows it
+    err_msg = is_valid_movie_id(movie_id)
+    if err_msg:
+        await update.message.reply_text(f'The provided movie id is invalid: ' + err_msg)
         return
     movie_id = int(movie_id)
     # Check if the movie is already in the watchlist
@@ -328,9 +337,9 @@ async def add_to_watched(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     movie_id = context.args[0]
-    if not movie_id.isdigit():
-        await update.message.reply_text(f'The provided movie id is not a digit!')
-        # TODO check that the id is actually valid! aka tmdb knows it
+    err_msg = is_valid_movie_id(movie_id)
+    if err_msg:
+        await update.message.reply_text(f'The provided movie id is invalid: ' + err_msg)
         return
     movie_id = int(movie_id)
     for _, w in user_data[user]["watchlists"].items():
@@ -356,9 +365,9 @@ async def remove_from_watchlist(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     movie_id = context.args[0]
-    if not movie_id.isdigit():
-        await update.message.reply_text(f'The provided movie id is not a digit!')
-        # TODO check that the id is actually valid! aka tmdb knows it
+    err_msg = is_valid_movie_id(movie_id)
+    if err_msg:
+        await update.message.reply_text(f'The provided movie id is invalid: ' + err_msg)
         return
     movie_id = int(movie_id)
     removed_smth = False
