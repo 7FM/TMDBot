@@ -3,7 +3,7 @@ import yaml
 import concurrent.futures
 import multiprocessing
 from collections import Counter
-from telegram import Update, MenuButtonCommands
+from telegram import Update, BotCommand
 from telegram.ext import Application, CommandHandler, CallbackContext, ContextTypes
 from telegram.constants import ParseMode
 from tmdbv3api import TMDb, Movie, Search, Genre, Provider
@@ -555,29 +555,35 @@ def main():
     application = Application.builder().token(
         settings["telegram_token"]).build()
 
-    # TODO add command menu (and ideally exclude the shortcuts)
+    application.bot.set_my_commands(commands=[
+        BotCommand("start", "OKAAAAY LETS GO!!!"),
+        BotCommand("search", "Search a movie based on given keywords"),
+        BotCommand("show", "Show your watchlists"),
+        BotCommand("add", "Add movie to your watchlist"),
+        BotCommand("tadd", "Add movie to your trash watchlist"),
+        BotCommand("watched", "Mark a movie as watched"),
+        BotCommand("remove", "Remove movie from all watchlists"),
+        BotCommand("services", "Show my streaming services"),
+        BotCommand("add_service", "Add a streaming service"),
+        BotCommand("rm_service", "Remove a streaming service"),
+        BotCommand("check", "Check the availability of movies in your watchlist"),
+        BotCommand("recommend", "Find recommendations based on your selected watchlist"),
+        BotCommand("popular", "Show currently popular movies available at your streaming services"),
+    ])
+
     application.add_handler(CommandHandler('start', start))
-    application.add_handler(CommandHandler('search', search_handler))
-    application.add_handler(CommandHandler('s', search_handler))
-    application.add_handler(CommandHandler('show', show_watchlist))
-    application.add_handler(CommandHandler('sh', show_watchlist))
-    application.add_handler(CommandHandler('add', add_to_watchlist))
-    application.add_handler(CommandHandler('a', add_to_watchlist))
-    application.add_handler(CommandHandler('tadd', add_to_trash_watchlist))
-    application.add_handler(CommandHandler('t', add_to_trash_watchlist))
-    application.add_handler(CommandHandler('watched', add_to_watched))
-    application.add_handler(CommandHandler('w', add_to_watched))
-    application.add_handler(CommandHandler('remove', remove_from_watchlist))
-    application.add_handler(CommandHandler('rm', remove_from_watchlist))
+    application.add_handler(CommandHandler(['search', 's'], search_handler))
+    application.add_handler(CommandHandler(['show', 'sh'], show_watchlist))
+    application.add_handler(CommandHandler(['add', 'a'], add_to_watchlist))
+    application.add_handler(CommandHandler(['tadd', 't'], add_to_trash_watchlist))
+    application.add_handler(CommandHandler(['watched', 'w'], add_to_watched))
+    application.add_handler(CommandHandler(['remove', 'rm'], remove_from_watchlist))
     application.add_handler(CommandHandler('services', show_my_providers))
     application.add_handler(CommandHandler('add_service', add_provider))
     application.add_handler(CommandHandler('rm_service', rm_provider))
-    application.add_handler(CommandHandler('check', check_watchlist))
-    application.add_handler(CommandHandler('c', check_watchlist))
-    application.add_handler(CommandHandler('recommend', recommend))
-    application.add_handler(CommandHandler('r', recommend))
-    application.add_handler(CommandHandler('popular', popular_movies))
-    application.add_handler(CommandHandler('pop', popular_movies))
+    application.add_handler(CommandHandler(['check', 'c'], check_watchlist))
+    application.add_handler(CommandHandler(['recommend', 'r'], recommend))
+    application.add_handler(CommandHandler(['popular', 'pop'], popular_movies))
 
     application.run_polling()
 
