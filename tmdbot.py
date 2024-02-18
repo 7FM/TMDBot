@@ -1,3 +1,4 @@
+import sys
 import os
 import yaml
 import concurrent.futures
@@ -14,7 +15,7 @@ def load_settings(file_path):
         return yaml.safe_load(file)
 
 
-SETTINGS_FILE = "settings.yaml"
+SETTINGS_FILE = "settings.yaml" if len(sys.argv) < 2 else sys.argv[1]
 settings = load_settings(SETTINGS_FILE)
 
 # Set up TMDb API
@@ -26,7 +27,7 @@ genre = Genre()
 provider = Provider()
 
 # File path for storing the user data
-USER_DATA_FILE = 'user_data.yaml'
+USER_DATA_FILE = 'user_data.yaml' if len(sys.argv) < 3 else sys.argv[2]
 user_data = dict()
 region = "DE"
 
