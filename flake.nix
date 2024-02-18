@@ -13,9 +13,7 @@
       };
 
       myPyPackages = python-packages: with python-packages; [
-        requests
         python-telegram-bot
-        autopep8 # autoformatter
         pyyaml
         (buildPythonPackage rec {
           pname = "tmdbv3api";
@@ -37,15 +35,17 @@
         })
       ];
 
-      tmdbot = pkgs.callPackage ({ buildPythonPackage, python-packages }: with python-packages; buildPythonPackage {
+      tmdbot = pkgs.callPackage ({ python3 }: python3.pkgs.buildPythonApplication {
           pname = "tmdbot";
           version = "0.1";
           src = ./.;
-          propagatedBuildInputs = myPyPackages;
+          propagatedBuildInputs = myPyPackages python3.pkgs;
           doCheck = false;
-      }) { python-packages = pkgs.python3.pkgs; };
+      }) {};
 
-      myPythonWithPackages = pkgs.python3.withPackages myPyPackages;
+      myPythonWithPackages = pkgs.python3.withPackages (python-packages: (myPyPackages python-packages) ++ (with python-packages; [
+        autopep8 # autoformatter
+      ]));
     in {
       packages = {
         inherit tmdbot;
