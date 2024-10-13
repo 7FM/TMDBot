@@ -192,11 +192,42 @@ def is_valid_movie_id(movie_id):
         return "Movie not found"
     return None
 
+def split_into_chunks(text, max_chunk_size=4096):
+    # Initialize variables
+    chunks = []
+    current_position = 0
+    text_length = len(text)
+
+    while current_position < text_length:
+        # Find the maximum possible chunk size
+        if current_position + max_chunk_size >= text_length:
+            # If the remaining text is smaller than the max_chunk_size, append it as the last chunk
+            chunks.append(text[current_position:])
+            break
+
+        # Find the last newline character within the max_chunk_size
+        last_newline = text.rfind('\n', current_position, current_position + max_chunk_size)
+
+        if last_newline == -1:
+            # If no newline found, force split at max_chunk_size (if necessary, but not ideal)
+            last_newline = current_position + max_chunk_size
+
+        # Append the chunk up to the last newline or the max_chunk_size
+        chunks.append(text[current_position:last_newline + 1])
+        # Move current_position to after the newline (or split point)
+        current_position = last_newline + 1
+
+    return chunks
+
+async def send_back_text(update: Update, msg):
+    chunks = split_into_chunks(msg)
+    for c in chunks:
+        await update.message.reply_text(esc(c), parse_mode=ParseMode.MARKDOWN_V2)
 
 # Define command handlers
 async def unauthorized_msg(update: Update) -> None:
     user_id = get_user_id(update)
-    await update.message.reply_text(esc(f'*Unauthorized user detected!*\nPlease contact the bot admin to whitelist your user id = `{user_id}`.\nOtherwise, consider hosting your own bot instance. The source code is publicly available at [GitHub](https://github.com/7FM/TMDBot).'), parse_mode=ParseMode.MARKDOWN_V2)
+    await send_back_text(update, f'*Unauthorized user detected!*\nPlease contact the bot admin to whitelist your user id = `{user_id}`.\nOtherwise, consider hosting your own bot instance. The source code is publicly available at [GitHub](https://github.com/7FM/TMDBot).')
 
 
 async def show_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -219,7 +250,7 @@ async def show_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         reply_text += f"{'' if reply_text == '' else nl + nl}{wn} watchlist:{nl}"
         reply_text += "\n".join(lookup_movies_in_watchlist(w))
 
-    await update.message.reply_text(esc(reply_text), parse_mode=ParseMode.MARKDOWN_V2)
+    await send_back_text(update, reply_text)
 
 
 async def show_my_providers(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -231,7 +262,7 @@ async def show_my_providers(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     provider = [f'`{mp}`' for mp in user_data[user]["providers"]]
     reply_text = "Your selected streaming services:\n" + "\n".join(provider)
 
-    await update.message.reply_text(esc(reply_text), parse_mode=ParseMode.MARKDOWN_V2)
+    await send_back_text(update, reply_text)
 
 
 async def add_provider(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -243,16 +274,16 @@ async def add_provider(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if not context.args:
         movie_provider = [f'`{mp}`' for mp in get_all_movie_provider(
             user_data[user]["region"])]
-        await update.message.reply_text(esc(f'Please provide a stream service.\nHere is a list of all available services in the region {user_data[user]["region"]}:\n' + "\n".join(movie_provider)), parse_mode=ParseMode.MARKDOWN_V2)
+        await send_back_text(update, f'Please provide a stream service.\nHere is a list of all available services in the region {user_data[user]["region"]}:\n' + "\n".join(movie_provider))
         return
 
     provider = ' '.join(context.args)
     if provider in user_data[user]["providers"]:
-        await update.message.reply_text("Streaming service is in your provider list")
+        await send_back_text(update, "Streaming service is in your provider list")
     else:
         user_data[user]["providers"].append(provider)
         save_user_data()
-        await update.message.reply_text("Streaming service was added")
+        await send_back_text(update, "Streaming service was added")
 
 
 async def rm_provider(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -263,33 +294,33 @@ async def rm_provider(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     if not context.args:
         movie_provider = [f'`{mp}`' for mp in user_data[user]["providers"]]
-        await update.message.reply_text(esc(f'Please provide a stream service.\nHere is a list of your selected services:\n' + "\n".join(movie_provider)), parse_mode=ParseMode.MARKDOWN_V2)
+        await send_back_text(update, f'Please provide a stream service.\nHere is a list of your selected services:\n' + "\n".join(movie_provider))
         return
 
     provider = ' '.join(context.args)
     if provider in user_data[user]["providers"]:
         user_data[user]["providers"].remove(provider)
         save_user_data()
-        await update.message.reply_text("Streaming service was removed from the provider list")
+        await send_back_text(update, "Streaming service was removed from the provider list")
     else:
         movie_provider = [f'`{mp}`' for mp in user_data[user]["providers"]]
-        await update.message.reply_text(esc(f'Streaming service is not in your provider list!\nHere is a list of your selected services:\n' + "\n".join(movie_provider)), parse_mode=ParseMode.MARKDOWN_V2)
+        await send_back_text(update, f'Streaming service is not in your provider list!\nHere is a list of your selected services:\n' + "\n".join(movie_provider))
 
 
 async def add_to_watchlist_helper(watchlist, movie_id, user, update: Update):
     err_msg = is_valid_movie_id(movie_id)
     if err_msg:
-        await update.message.reply_text(f'The provided movie id is invalid: ' + err_msg)
+        await send_back_text(update, f'The provided movie id is invalid: ' + err_msg)
         return
     movie_id = int(movie_id)
     # Check if the movie is already in the watchlist
     already_in = is_in_any_watchlist(movie_id, user)
     if already_in:
-        await update.message.reply_text(f'This movie is already in your "{already_in}" watchlist.')
+        await send_back_text(update, f'This movie is already in your "{already_in}" watchlist.')
     else:
         user_data[user]["watchlists"][watchlist].append(movie_id)
         save_user_data()
-        await update.message.reply_text('Movie added to watchlist.')
+        await send_back_text(update, 'Movie added to watchlist.')
 
 
 async def add_to_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -299,14 +330,14 @@ async def add_to_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
 
     if not context.args:
-        await update.message.reply_text('Please provide the movie ID.')
+        await send_back_text(update, 'Please provide the movie ID.')
         return
 
     watchlist = "normal"
     if len(context.args) == 2:
         watchlist = context.args[1]
     if watchlist not in user_data[user]["watchlists"]:
-        await update.message.reply_text(f'Info: creating new watchlist "{watchlist}"')
+        await send_back_text(update, f'Info: creating new watchlist "{watchlist}"')
         user_data[user]["watchlists"][watchlist] = []
 
     movie_id = context.args[0]
@@ -320,7 +351,7 @@ async def add_to_trash_watchlist(update: Update, context: ContextTypes.DEFAULT_T
         return
 
     if not context.args:
-        await update.message.reply_text('Please provide the movie ID.')
+        await send_back_text(update, 'Please provide the movie ID.')
         return
 
     movie_id = context.args[0]
@@ -334,13 +365,13 @@ async def add_to_watched(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     if not context.args:
-        await update.message.reply_text('Please provide the movie ID.')
+        await send_back_text(update, 'Please provide the movie ID.')
         return
 
     movie_id = context.args[0]
     err_msg = is_valid_movie_id(movie_id)
     if err_msg:
-        await update.message.reply_text(f'The provided movie id is invalid: ' + err_msg)
+        await send_back_text(update, f'The provided movie id is invalid: ' + err_msg)
         return
     movie_id = int(movie_id)
     for _, w in user_data[user]["watchlists"].items():
@@ -350,9 +381,9 @@ async def add_to_watched(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if movie_id not in user_data[user]["watched"]:
         user_data[user]["watched"].append(movie_id)
         save_user_data()
-        await update.message.reply_text('Movie marked as watched.')
+        await send_back_text(update, 'Movie marked as watched.')
     else:
-        await update.message.reply_text('Movie was already marked as watched.')
+        await send_back_text(update, 'Movie was already marked as watched.')
 
 
 async def remove_from_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -362,13 +393,13 @@ async def remove_from_watchlist(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     if not context.args:
-        await update.message.reply_text('Please provide the movie ID.')
+        await send_back_text(update, 'Please provide the movie ID.')
         return
 
     movie_id = context.args[0]
     err_msg = is_valid_movie_id(movie_id)
     if err_msg:
-        await update.message.reply_text(f'The provided movie id is invalid: ' + err_msg)
+        await send_back_text(update, f'The provided movie id is invalid: ' + err_msg)
         return
     movie_id = int(movie_id)
     removed_smth = False
@@ -378,9 +409,9 @@ async def remove_from_watchlist(update: Update, context: ContextTypes.DEFAULT_TY
             removed_smth = True
     if removed_smth:
         save_user_data()
-        await update.message.reply_text('Movie removed from watchlist.')
+        await send_back_text(update, 'Movie removed from watchlist.')
     else:
-        await update.message.reply_text('This movie is not in your watchlist.')
+        await send_back_text(update, 'This movie is not in your watchlist.')
 
 
 async def recommend(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -394,10 +425,10 @@ async def recommend(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         watchlist = context.args[0]
 
     if not user_data[user]["watchlists"][watchlist]:
-        await update.message.reply_text(f'Your "{watchlist}" watchlist is empty.')
+        await send_back_text(update, f'Your "{watchlist}" watchlist is empty.')
         return
 
-    await update.message.reply_text('THIS WILL TAKE A WHILE! Lay back and wait c:')
+    await send_back_text(update, 'THIS WILL TAKE A WHILE! Lay back and wait c:')
 
     def query_recommendations(movie_id):
         available_recommendations = []
@@ -441,16 +472,16 @@ async def recommend(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # available_recommendations = sort_by_rating(available_recommendations)
     num_rec = min(50, len(available_recommendations))
     if available_recommendations:
-        await update.message.reply_text(f'Recommended movies based on your "{watchlist}" watchlist:')
+        await send_back_text(update, f'Recommended movies based on your "{watchlist}" watchlist:')
         # Giving all the recommendations lol
         for _, poster_path, caption, provider, _ in available_recommendations[:num_rec]:
             provider_str = create_available_at_str(provider)
             if poster_path:
                 await update.message.reply_photo(poster_path, esc(caption + "\n" + provider_str), parse_mode=ParseMode.MARKDOWN_V2)
             else:
-                await update.message.reply_text(esc(caption + "\n" + provider_str), parse_mode=ParseMode.MARKDOWN_V2)
+                await send_back_text(update, caption + "\n" + provider_str)
     else:
-        await update.message.reply_text(f'No recommendations found based on your "{watchlist}" watchlist.')
+        await send_back_text(update, f'No recommendations found based on your "{watchlist}" watchlist.')
 
 
 async def check_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -475,7 +506,7 @@ async def check_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     async def print_available(movies, prefix):
         if movies:
-            await update.message.reply_text(f'Movies on your {prefix} watchlist available on streaming services:')
+            await send_back_text(update, f'Movies on your {prefix} watchlist available on streaming services:')
             for movie_id, provider in movies:
                 movie_details = movie.details(movie_id)
                 _, poster, desc = extract_movie_info(movie_details)
@@ -483,10 +514,10 @@ async def check_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 if poster:
                     await update.message.reply_photo(poster, esc(desc + "\n" + provider_str), parse_mode=ParseMode.MARKDOWN_V2)
                 else:
-                    await update.message.reply_text(esc(desc + "\n" + provider_str), parse_mode=ParseMode.MARKDOWN_V2)
+                    await send_back_text(update, desc + "\n" + provider_str)
 
         else:
-            await update.message.reply_text(f'None of the movies on your {prefix} watchlist are available on streaming services.')
+            await send_back_text(update, f'None of the movies on your {prefix} watchlist are available on streaming services.')
 
     for wn, movies in available_movies:
         await print_available(movies, wn)
@@ -523,7 +554,7 @@ async def popular_movies(update: Update, context: CallbackContext) -> None:
         if poster_path:
             await update.message.reply_photo(poster_path, esc(caption + "\n" + provider_str), parse_mode=ParseMode.MARKDOWN_V2)
         else:
-            await update.message.reply_text(esc(caption + "\n" + provider_str), parse_mode=ParseMode.MARKDOWN_V2)
+            await send_back_text(update, caption + "\n" + provider_str)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -531,7 +562,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if check_user_invalid(user):
         await unauthorized_msg(update)
         return
-    await update.message.reply_text('Welcome to TMDBot! Use /search to search for a movie.')
+    await send_back_text(update, 'Welcome to TMDBot! Use /search to search for a movie.')
 
 
 async def search_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -543,7 +574,7 @@ async def search_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     query = ' '.join(context.args)
     results = search.movies(query)
     if results and results["total_results"] > 0:
-        await update.message.reply_text(f'Search results for "{query}":')
+        await send_back_text(update, f'Search results for "{query}":')
         movies = results["results"]
         res = []
         for m in movies:
@@ -555,10 +586,10 @@ async def search_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             if poster_path:
                 await update.message.reply_photo(poster_path, esc(caption), parse_mode=ParseMode.MARKDOWN_V2)
             else:
-                await update.message.reply_text(esc(caption), parse_mode=ParseMode.MARKDOWN_V2)
+                await send_back_text(update, caption)
 
     else:
-        await update.message.reply_text('No results found.')
+        await send_back_text(update, 'No results found.')
 
 
 def main():
