@@ -318,6 +318,8 @@ async def add_to_watchlist_helper(watchlist, movie_id, user, update: Update):
     if already_in:
         await send_back_text(update, f'This movie is already in your "{already_in}" watchlist.')
     else:
+        if movie_id in user_data[user]["watched"]:
+            await send_back_text(update, "Warning: you have already seen this movie!")
         user_data[user]["watchlists"][watchlist].append(movie_id)
         save_user_data()
         await send_back_text(update, 'Movie added to watchlist.')
