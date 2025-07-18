@@ -598,7 +598,7 @@ def main():
     application = Application.builder().token(
         settings["telegram_token"]).build()
 
-    application.bot.set_my_commands(commands=[
+    await application.bot.set_my_commands(commands=[
         BotCommand("start", "OKAAAAY LETS GO!!!"),
         BotCommand("search", "Search a movie based on given keywords"),
         BotCommand("show", "Show your watchlists"),
