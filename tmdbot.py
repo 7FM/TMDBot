@@ -1,3 +1,4 @@
+import asyncio
 import sys
 import os
 import yaml
@@ -598,7 +599,7 @@ def main():
     application = Application.builder().token(
         settings["telegram_token"]).build()
 
-    await application.bot.set_my_commands(commands=[
+    asyncio.run(application.bot.set_my_commands(commands=[
         BotCommand("start", "OKAAAAY LETS GO!!!"),
         BotCommand("search", "Search a movie based on given keywords"),
         BotCommand("show", "Show your watchlists"),
@@ -612,7 +613,7 @@ def main():
         BotCommand("check", "Check the availability of movies in your watchlist"),
         BotCommand("recommend", "Find recommendations based on your selected watchlist"),
         BotCommand("popular", "Show currently popular movies available at your streaming services"),
-    ])
+    ]))
 
     application.add_handler(CommandHandler('start', start))
     application.add_handler(CommandHandler(['search', 's'], search_handler))
