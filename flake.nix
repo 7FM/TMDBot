@@ -19,6 +19,9 @@
           pname = "tmdbv3api";
           version = "1.9.0";
 
+          pyproject = true;
+          build-system = [ setuptools ];
+
           src = pkgs.fetchPypi {
             inherit pname version;
             sha256 = "sha256-UExdprmcRRb/FgoBV2ES0JfyCcBTT5Q8FcS1bL2Swzs=";
@@ -38,6 +41,8 @@
       tmdbot = pkgs.callPackage ({ python3 }: python3.pkgs.buildPythonApplication {
           pname = "tmdbot";
           version = "0.1";
+          pyproject = true;
+          build-system = [ python3.pkgs.setuptools ];
           src = ./.;
           propagatedBuildInputs = myPyPackages python3.pkgs;
           doCheck = false;
