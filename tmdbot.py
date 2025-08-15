@@ -613,7 +613,7 @@ async def main():
         BotCommand("check", "Check the availability of movies in your watchlist"),
         BotCommand("recommend", "Find recommendations based on your selected watchlist"),
         BotCommand("popular", "Show currently popular movies available at your streaming services"),
-    ]))
+    ])
 
     application.add_handler(CommandHandler('start', start))
     application.add_handler(CommandHandler(['search', 's'], search_handler))
