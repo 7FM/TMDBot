@@ -1,4 +1,3 @@
-import asyncio
 import sys
 import os
 import yaml
@@ -595,11 +594,11 @@ async def search_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await send_back_text(update, 'No results found.')
 
 
-async def main():
+def main():
     application = Application.builder().token(
         settings["telegram_token"]).build()
 
-    await application.bot.set_my_commands(commands=[
+    application.bot.set_my_commands(commands=[
         BotCommand("start", "OKAAAAY LETS GO!!!"),
         BotCommand("search", "Search a movie based on given keywords"),
         BotCommand("show", "Show your watchlists"),
@@ -633,4 +632,4 @@ async def main():
 
 
 if __name__ == '__main__':
-    asyncio.run(main())
+    main()
