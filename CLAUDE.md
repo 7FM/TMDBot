@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-TMDBot is a Telegram bot for discovering and managing movies using The Movie Database (TMDb) API. It provides movie search, watchlist management, streaming provider integration, rating, recommendation features, and user onboarding. The entire bot is implemented in a single file (`tmdbot.py`, ~1285 lines).
+TMDBot is a Telegram bot for discovering and managing movies using The Movie Database (TMDb) API. It provides movie search, watchlist management, streaming provider integration, rating, recommendation features, random movie picker, and user onboarding. The entire bot is implemented in a single file (`tmdbot.py`, ~1530 lines).
 
 ## Build & Run
 
@@ -28,13 +28,14 @@ Two YAML files (git-ignored) are required at runtime:
 
 **Single-file design:** All logic lives in `tmdbot.py`. Key layers:
 
-1. **Global initialization** (lines 1-125): Loads settings, initializes TMDb API clients, genre cache, and `REGIONS` list at module level
-2. **Global state** (lines 127-143): In-memory caches and UI constants — `_provider_cache`, `_pending_new_watchlist`, `_pending_search`, `_chunk_movies`/`_chunk_id_counter` (expand/collapse state), `_search_results` (search message tracking), `_rate_list_messages` (rate list tracking), `MAIN_KEYBOARD` (persistent reply keyboard)
-3. **Helper functions** (lines 145-530): Movie info extraction, MarkdownV2 escaping, message chunking, provider lookups (including `append_to_response` optimization), keyboard builders, `send_movie_message()`, `send_movie_list()`
-4. **Command handlers** (lines 535-930): Async handlers registered via `python-telegram-bot`'s `CommandHandler`
-5. **Callback handler** (`button_callback_handler()`, line 933): Central dispatcher for all inline keyboard button presses
-6. **Reply handler** (`reply_handler()`, line 1206): Handles `ForceReply` responses for search and new watchlist creation
-7. **Entry point** (`main()`, line 1259): Builds the `Application` with `post_init` for async setup, registers all handlers, starts polling
+1. **Global initialization** (lines 1-129): Loads settings, initializes TMDb API clients, genre cache, logger, and `REGIONS` list at module level
+2. **Global state** (lines 131-150): In-memory caches and UI constants — `_provider_cache`, `_pending_new_watchlist`, `_pending_search`, `_chunk_movies`/`_chunk_id_counter` (expand/collapse state), `_search_results` (search message tracking), `_search_more` (search pagination state), `_rate_list_messages` (rate list tracking), `_rec_genre_filter` (recommendation genre filter state), `MAIN_KEYBOARD` (persistent reply keyboard)
+3. **Helper functions** (lines 152-545): Movie info extraction, MarkdownV2 escaping, message chunking, provider lookups (all using `append_to_response` via `_parse_providers_from_details`), keyboard builders (including `build_genre_picker_keyboard`), `send_movie_message()`, `send_movie_list()`
+4. **Command handlers** (lines 547-940): Async handlers registered via `python-telegram-bot`'s `CommandHandler`
+5. **Callback handler** (`button_callback_handler()`, line 1051): Central dispatcher for all inline keyboard button presses
+6. **Reply handler** (`reply_handler()`, line 1437): Handles `ForceReply` responses for search and new watchlist creation
+7. **Error handler** (`error_handler()`, line 1473): Logs exceptions and sends user-friendly error messages
+8. **Entry point** (`main()`, line 1503): Builds the `Application` with `post_init` for async setup, registers all handlers and error handler, starts polling
 
 **Key patterns:**
 
@@ -46,8 +47,10 @@ Two YAML files (git-ignored) are required at runtime:
 - Movie search results use `send_movie_message()` which attaches inline keyboard buttons (Add/Remove/Watched); search result message IDs are tracked in `_search_results` for cleanup after user action
 - List-based views (watchlist browsing, recommend, check, popular, rate) use `send_movie_list(bot, chat_id, ...)` which produces chunked itemized lists with expand/collapse buttons, link preview disabled, and returns sent `Message` objects for tracking
 - `extract_movie_info(m, skip_trailer=False)` — list views pass `skip_trailer=True` to avoid per-movie API calls; trailers are fetched lazily when the user taps a detail button
-- Recommendations use `concurrent.futures.ThreadPoolExecutor` for parallel TMDb API calls, with sources capped at watchlist + top 20 highest-rated watched movies
-- `/check` uses `movie.details(id, append_to_response="watch/providers")` to combine details and provider lookup into a single API call per movie
+- Recommendations use `concurrent.futures.ThreadPoolExecutor` for parallel TMDb API calls, with sources capped at watchlist + top 20 highest-rated watched movies; an optional genre filter narrows results via `_rec_genre_filter` state
+- `/check` and `/popular` both use `ThreadPoolExecutor` for parallel provider lookups; all provider lookups go through `movie.details(id, append_to_response="watch/providers")` + `_parse_providers_from_details`
+- Search results show 5 at a time with a "Show more" button; remaining results are stored in `_search_more` per user
+- `/pick` selects a random movie from a watchlist with a "Pick another" inline button (`rpick` callback)
 - Detail messages (`det`/`rdet` callbacks) are sent as standalone messages (not replies) via `bot.send_photo`/`bot.send_message` so Telegram clients auto-scroll to them
 
 **Inline keyboard & callback system:**
@@ -61,10 +64,13 @@ All button presses route through `button_callback_handler()` using colon-delimit
 - `nwl` — new watchlist from list view; `wledit` / `wlback` — enter/exit edit mode; `dwl:<name>` / `dwly:<name>` / `dwln` — delete watchlist flow
 - `sp:<index>` — toggle streaming provider
 - `reg:<code>` — select region; `regp:<page>` — region picker pagination; `chreg` — change region; `obdone` — complete onboarding
+- `rpick:<watchlist>` — pick another random movie from watchlist
+- `smore` — show next 5 search results
+- `gf:<genre_id>` — toggle genre in recommendation filter; `recgo:skip` / `recgo:filter` — launch recommendations (all genres or filtered)
 
 **Onboarding:** New users (flagged with `onboarded: false`) get a region picker → streaming service selector flow on `/start`. Region picker is paginated with flag emojis. The services keyboard includes a "Change region" button for all users and a "Done" button during onboarding.
 
-**Message cleanup:** Search results are tracked per-user in `_search_results` and deleted after user action (add/remove/watched), with a confirmation message sent to restore `MAIN_KEYBOARD`. Rate list messages are tracked in `_rate_list_messages` and refreshed after rating via `rrate` (but not `rate` from other contexts). Previous search results are also cleaned up when a new search starts.
+**Message cleanup:** Search results are tracked per-user in `_search_results` and deleted after user action (add/remove/watched), with a confirmation message sent to restore `MAIN_KEYBOARD`. `_search_more` pagination state is also cleaned up alongside search results. Rate list messages are tracked in `_rate_list_messages` and refreshed after rating via `rrate` (but not `rate` from other contexts). Previous search results are also cleaned up when a new search starts.
 
 **Multi-step interactions** use `ForceReply` + pending state dicts (`_pending_new_watchlist`, `_pending_search`), handled by `reply_handler()`.
 
@@ -74,4 +80,4 @@ All button presses route through `button_callback_handler()` using colon-delimit
 
 ## Bot Commands
 
-Commands are registered with short aliases (e.g., `/search`/`/s`, `/list`/`/l`, `/recommend`/`/r`). The full mapping is in `main()` at the handler registration block (line 1259+). A persistent reply keyboard provides quick access to `/search`, `/list`, `/check`, `/recommend`, `/popular`.
+Commands are registered with short aliases (e.g., `/search`/`/s`, `/list`/`/l`, `/recommend`/`/r`, `/pick`/`/p`). The full mapping is in `main()` at the handler registration block (line 1503+). A persistent reply keyboard provides quick access to `/search`, `/list`, `/check`, `/recommend`, `/popular`, and `/pick`.
