@@ -2,6 +2,7 @@ import sys
 import os
 import re
 import asyncio
+import time
 import yaml
 import logging
 import random
@@ -11,7 +12,7 @@ from collections import Counter
 from telegram import Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton, LinkPreviewOptions, ForceReply
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, CallbackContext, ContextTypes
 from telegram.constants import ParseMode
-from tmdbv3api import TMDb, Movie, Search, Genre, Provider
+from tmdbv3api import TMDb, Movie, TV, Search, Genre, Provider
 
 logger = logging.getLogger(__name__)
 
@@ -28,9 +29,14 @@ settings = load_settings(SETTINGS_FILE)
 tmdb = TMDb()
 tmdb.api_key = settings["tmdb_api_key"]
 movie = Movie()
+tv = TV()
 search = Search()
 genre = Genre()
 provider = Provider()
+
+
+def get_api(mode):
+    return movie if mode == "movie" else tv
 
 # File path for storing the user data
 USER_DATA_FILE = 'user_data.yaml' if len(sys.argv) < 3 else sys.argv[2]
@@ -77,12 +83,30 @@ def user_data_initialize():
         if user not in user_data:
             user_data[user] = dict()
             user_data[user]["region"] = region
-            user_data[user]["watched"] = {}
-            user_data[user]["watchlists"] = dict()
-            user_data[user]["watchlists"]["normal"] = []
-            user_data[user]["watchlists"]["trash"] = []
+            user_data[user]["watched"] = {"movie": {}, "tv": {}}
+            user_data[user]["watchlists"] = {
+                "movie": {"normal": [], "trash": []},
+                "tv": {"normal": [], "trash": []},
+            }
             user_data[user]["providers"] = []
             user_data[user]["onboarded"] = False
+            user_data[user]["mode"] = "movie"
+        else:
+            ud = user_data[user]
+            # Migrate mode
+            if "mode" not in ud:
+                ud["mode"] = "movie"
+            # Migrate flat watchlists to nested
+            if "watchlists" in ud and "movie" not in ud["watchlists"]:
+                old_wl = ud["watchlists"]
+                ud["watchlists"] = {
+                    "movie": old_wl,
+                    "tv": {"normal": [], "trash": []},
+                }
+            # Migrate flat watched to nested
+            if "watched" in ud and "movie" not in ud["watched"]:
+                old_watched = ud["watched"]
+                ud["watched"] = {"movie": old_watched, "tv": {}}
     save_user_data()
 
 
@@ -111,7 +135,20 @@ def get_movie_genres():
     return genre_dict
 
 
-genre_dict = get_movie_genres()
+def get_tv_genres():
+    gd = dict()
+    tv_genres = genre.tv_list()["genres"]
+    for tg in tv_genres:
+        gd[tg["id"]] = tg["name"]
+    return gd
+
+
+movie_genre_dict = get_movie_genres()
+tv_genre_dict = get_tv_genres()
+
+
+def get_genre_dict(mode):
+    return movie_genre_dict if mode == "movie" else tv_genre_dict
 
 # Helper functions
 
@@ -122,7 +159,8 @@ def get_image_url(path):
     return None
 
 
-_provider_cache = {}
+_provider_cache = {}  # region -> (timestamp, list[str])
+_PROVIDER_CACHE_TTL = 86400  # 24 hours
 _pending_new_watchlist = {}
 _pending_search = {}
 _chunk_movies = {}
@@ -133,32 +171,41 @@ _rate_list_messages = {}  # user_id -> (chat_id, [message_ids])
 _rec_genre_filter = {}  # user_id -> {"watchlist": str, "genres": set}
 _last_watched = {}  # user_id -> {"mid": int, "watchlist": str|None, "prev_rating": int|None|"absent"}
 
-MAIN_KEYBOARD = ReplyKeyboardMarkup(
-    [
-        [KeyboardButton("/search"), KeyboardButton("/list"), KeyboardButton("/check")],
-        [KeyboardButton("/recommend"), KeyboardButton("/popular")],
-        [KeyboardButton("/pick"), KeyboardButton("/clear")],
-    ],
-    resize_keyboard=True,
-    is_persistent=True,
-)
+_MODE_SWITCH_TV = "\U0001f4fa Switch to TV"
+_MODE_SWITCH_MOVIE = "\U0001f3ac Switch to Movies"
+
+
+def get_main_keyboard(user):
+    mode = user_data.get(user, {}).get("mode", "movie")
+    toggle_label = _MODE_SWITCH_TV if mode == "movie" else _MODE_SWITCH_MOVIE
+    return ReplyKeyboardMarkup(
+        [
+            [KeyboardButton("/search"), KeyboardButton("/list"), KeyboardButton("/check")],
+            [KeyboardButton("/recommend"), KeyboardButton("/popular")],
+            [KeyboardButton("/pick"), KeyboardButton("/clear"), KeyboardButton(toggle_label)],
+        ],
+        resize_keyboard=True,
+        is_persistent=True,
+    )
 
 
 def get_all_movie_provider(region):
     if region in _provider_cache:
-        return _provider_cache[region]
+        cached_time, cached_result = _provider_cache[region]
+        if time.time() - cached_time < _PROVIDER_CACHE_TTL:
+            return cached_result
     movie_provider = provider.movie_providers(region=region)
     result = []
     if movie_provider:
         movie_provider = movie_provider["results"]
         result = [mp["provider_name"] for mp in movie_provider]
-    _provider_cache[region] = result
+    _provider_cache[region] = (time.time(), result)
     return result
 
 
 # TODO JustWatch Attribution Required
-def get_free_provider(id, country_code):
-    details = movie.details(id, append_to_response="watch/providers")
+def get_free_provider(id, country_code, mode="movie"):
+    details = get_api(mode).details(id, append_to_response="watch/providers")
     return _parse_providers_from_details(details, country_code)
 
 
@@ -173,9 +220,9 @@ def _match_providers(my_providers, provider_list):
     return len(available) > 0, available
 
 
-def is_available_for_free(my_providers, id, country_code):
-    provider = get_free_provider(id, country_code)
-    return _match_providers(my_providers, provider)
+def is_available_for_free(my_providers, id, country_code, mode="movie"):
+    prov = get_free_provider(id, country_code, mode=mode)
+    return _match_providers(my_providers, prov)
 
 
 def _parse_providers_from_details(details, country_code):
@@ -193,29 +240,46 @@ def create_available_at_str(provider):
     return "Available at: " + (", ".join([p[0] for p in provider]))
 
 
-def extract_trailer_url(m):
-    if "trailers" not in m:
-        m = movie.details(m["id"], append_to_response="trailers")
-    if "trailers" in m and "youtube" in m["trailers"]:
-        for t in m["trailers"]["youtube"]:
-            if t["type"] == "Trailer":
-                return f'https://www.youtube.com/watch?v={t["source"]}'
-
+def extract_trailer_url(m, mode="movie"):
+    api = get_api(mode)
+    # Movies use "trailers" key, TV uses "videos"
+    if mode == "movie":
+        if "trailers" not in m:
+            m = api.details(m["id"], append_to_response="trailers")
+        if "trailers" in m and "youtube" in m["trailers"]:
+            for t in m["trailers"]["youtube"]:
+                if t["type"] == "Trailer":
+                    return f'https://www.youtube.com/watch?v={t["source"]}'
+    else:
+        if "videos" not in m:
+            m = api.details(m["id"], append_to_response="videos")
+        try:
+            for v in m["videos"]["results"]:
+                if v.get("site") == "YouTube" and v.get("type") == "Trailer":
+                    return f'https://www.youtube.com/watch?v={v["key"]}'
+        except (KeyError, TypeError, AttributeError):
+            pass
     return None
 
 
-def extract_genre(m):
-    global genre_dict
-    genre = []
+def extract_genre(m, mode="movie"):
+    global movie_genre_dict, tv_genre_dict
+    gd = get_genre_dict(mode)
+    result = []
     if "genre_ids" in m:
         for g in m["genre_ids"]:
-            if g not in genre_dict:
-                genre_dict = get_movie_genres()
-            genre.append(genre_dict[g])
+            if g not in gd:
+                if mode == "movie":
+                    movie_genre_dict = get_movie_genres()
+                else:
+                    tv_genre_dict = get_tv_genres()
+                gd = get_genre_dict(mode)
+            if g in gd:
+                result.append(gd[g])
     elif "genres" in m:
         for g in m["genres"]:
-            genre.append(g["name"])
-    return genre
+            result.append(g["name"])
+    return result
 
 
 def esc(s):
@@ -242,40 +306,61 @@ def _esc_plain(s):
     return "".join(f"\\{c}" if c in special else c for c in s)
 
 
-def extract_movie_info(m, skip_trailer=False):
-    title = m["title"]
-    poster_path = get_image_url(m['poster_path'])
-    # popularity = m["popularity"] if "popularity" in m else -1
-    rating = m["vote_average"] if "vote_average" in m and m["vote_count"] > 0 else None
-    release_date = m["release_date"] if "release_date" in m and m["release_date"] != "" else None
-    id = m["id"]
-    genre = extract_genre(m)
-    trailer = None if skip_trailer else extract_trailer_url(m)
-    if trailer:
-        title = f'[{title}]({trailer})'
+def extract_movie_info(m, skip_trailer=False, mode="movie"):
+    title = m.get("title") or m.get("name") or "Unknown"
+    poster_path = get_image_url(m.get('poster_path'))
+    rating = m["vote_average"] if "vote_average" in m and m.get("vote_count", 0) > 0 else None
+    if mode == "movie":
+        date_str = m.get("release_date") or None
     else:
-        title = f'`{title}`'
-    desc = title + (" - " + release_date if release_date else "") + (" - " + (", ".join(genre)) if genre else "") + ' - ' + (str(round(rating, 1)) if rating else "?") + '/10'
-    return (rating if rating else 0, poster_path, desc, id)
+        date_str = m.get("first_air_date") or None
+    if date_str == "":
+        date_str = None
+    mid = m["id"]
+    genres = extract_genre(m, mode=mode)
+    trailer = None if skip_trailer else extract_trailer_url(m, mode=mode)
+    if trailer:
+        title_str = f'[{title}]({trailer})'
+    else:
+        title_str = f'`{title}`'
+    parts = [title_str]
+    if date_str:
+        parts.append(date_str)
+    if mode == "tv":
+        seasons = m.get("number_of_seasons")
+        if seasons:
+            parts.append(f"{seasons} season{'s' if seasons != 1 else ''}")
+    if genres:
+        parts.append(", ".join(genres))
+    parts.append((str(round(rating, 1)) if rating else "?") + '/10')
+    desc = " - ".join(parts)
+    return (rating if rating else 0, poster_path, desc, mid)
 
 
 def sort_by_rating(movie_list):
     return sorted(movie_list, key=lambda x: x[0], reverse=True)
 
 
-def is_in_any_watchlist(movie_id, user):
-    for wn, w in user_data[user]["watchlists"].items():
-        if movie_id in w:
+def is_in_any_watchlist(media_id, user, mode=None):
+    if mode is None:
+        mode = user_data[user].get("mode", "movie")
+    for wn, w in user_data[user]["watchlists"][mode].items():
+        if media_id in w:
             return wn
     return None
 
-def is_valid_movie_id(movie_id):
-    if not movie_id.isdigit():
+def find_all_watchlists(media_id, user, mode=None):
+    if mode is None:
+        mode = user_data[user].get("mode", "movie")
+    return [wn for wn, w in user_data[user]["watchlists"][mode].items() if media_id in w]
+
+def is_valid_media_id(media_id, mode="movie"):
+    if not media_id.isdigit():
         return "ID is not a number"
     try:
-        movie.details(movie_id)
-    except:
-        return "Movie not found"
+        get_api(mode).details(media_id)
+    except Exception:
+        return "Movie not found" if mode == "movie" else "TV show not found"
     return None
 
 def split_into_chunks(text, max_chunk_size=4096):
@@ -336,68 +421,101 @@ async def _cleanup_rate_list(bot, user):
             pass
 
 
-async def send_back_text(update: Update, msg):
+async def send_back_text(update: Update, msg, user=None):
+    if user is None:
+        user = get_user_id(update)
+    kb = get_main_keyboard(user)
     chunks = split_into_chunks(msg)
     sent = []
     for c in chunks:
         sent.append(await update.message.reply_text(
             esc(c), parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=MAIN_KEYBOARD))
+            reply_markup=kb))
     return sent
 
 
 def parse_callback_data(data: str):
-    parts = data.split(":", 2)
+    """Parse callback data in format action:type:id or action:type:id:watchlist.
+    Returns (action, media_type, media_id, watchlist)."""
+    parts = data.split(":", 3)
+    if len(parts) < 3:
+        return None, None, None, None
     action = parts[0]
-    movie_id = int(parts[1])
-    watchlist = parts[2] if len(parts) > 2 else None
-    return action, movie_id, watchlist
+    media_type = parts[1]  # "m" or "tv"
+    try:
+        media_id = int(parts[2])
+    except (ValueError, IndexError):
+        return None, None, None, None
+    watchlist = parts[3] if len(parts) > 3 else None
+    return action, media_type, media_id, watchlist
 
 
-def build_movie_keyboard(movie_id: int, user: int) -> InlineKeyboardMarkup:
+def _mode_to_type(mode):
+    """Convert user mode to callback type prefix."""
+    return "m" if mode == "movie" else "tv"
+
+
+def _type_to_mode(media_type):
+    """Convert callback type prefix to user mode."""
+    return "movie" if media_type == "m" else "tv"
+
+
+def build_media_keyboard(media_id: int, user: int, mode=None) -> InlineKeyboardMarkup:
+    if mode is None:
+        mode = user_data[user].get("mode", "movie")
+    mt = _mode_to_type(mode)
     buttons = []
-    watchlist_name = is_in_any_watchlist(movie_id, user)
+    watchlist_name = is_in_any_watchlist(media_id, user, mode=mode)
     if watchlist_name:
-        buttons.append(InlineKeyboardButton("Remove", callback_data=f"rm:{movie_id}"))
+        buttons.append(InlineKeyboardButton("Remove", callback_data=f"rm:{mt}:{media_id}"))
     else:
-        buttons.append(InlineKeyboardButton("Add", callback_data=f"pick:{movie_id}"))
-    buttons.append(InlineKeyboardButton("Watched", callback_data=f"w:{movie_id}"))
+        buttons.append(InlineKeyboardButton("Add", callback_data=f"pick:{mt}:{media_id}"))
+    already_watched = media_id in user_data[user].get("watched", {}).get(mode, {})
+    if not already_watched:
+        buttons.append(InlineKeyboardButton("Watched", callback_data=f"w:{mt}:{media_id}"))
     return InlineKeyboardMarkup([buttons])
 
 
-def build_watchlist_picker_keyboard(movie_id: int, user: int) -> InlineKeyboardMarkup:
+def build_watchlist_picker_keyboard(media_id: int, user: int, mode=None) -> InlineKeyboardMarkup:
+    if mode is None:
+        mode = user_data[user].get("mode", "movie")
+    mt = _mode_to_type(mode)
     rows = []
-    for wn in user_data[user]["watchlists"]:
-        cb_data = f"a:{movie_id}:{wn}"
+    for wn in user_data[user]["watchlists"][mode]:
+        cb_data = f"a:{mt}:{media_id}:{wn}"
         if len(cb_data.encode('utf-8')) > 64:
             continue
         rows.append([InlineKeyboardButton(wn, callback_data=cb_data)])
     rows.append([
-        InlineKeyboardButton("New", callback_data=f"new:{movie_id}"),
-        InlineKeyboardButton("Back", callback_data=f"back:{movie_id}")
+        InlineKeyboardButton("New", callback_data=f"new:{mt}:{media_id}"),
+        InlineKeyboardButton("Back", callback_data=f"back:{mt}:{media_id}")
     ])
     return InlineKeyboardMarkup(rows)
 
 
-def build_chunk_keyboard(chunk_id: int, movies_list, expanded: bool, detail_action: str = "det") -> InlineKeyboardMarkup:
+def build_chunk_keyboard(chunk_id: int, movies_list, expanded: bool, detail_action: str = "det", media_type: str = "m") -> InlineKeyboardMarkup:
     if expanded:
         rows = [[InlineKeyboardButton(
-            m_title, callback_data=f"{detail_action}:{m_id}")]
+            m_title, callback_data=f"{detail_action}:{media_type}:{m_id}")]
             for m_id, m_title in movies_list]
         rows.append([InlineKeyboardButton(
             "Collapse", callback_data=f"col:{chunk_id}")])
     else:
+        label = "Show items" if media_type == "tv" else "Show movies"
         rows = [[InlineKeyboardButton(
-            "Show movies", callback_data=f"exp:{chunk_id}")]]
+            label, callback_data=f"exp:{chunk_id}")]]
     return InlineKeyboardMarkup(rows)
 
 
-def build_watchlist_select_keyboard(user: int, edit_mode: bool = False) -> InlineKeyboardMarkup:
+def build_watchlist_select_keyboard(user: int, edit_mode: bool = False, mode=None) -> InlineKeyboardMarkup:
+    if mode is None:
+        mode = user_data[user].get("mode", "movie")
+    wls = user_data[user]["watchlists"][mode]
     rows = []
-    for wn in user_data[user]["watchlists"]:
+    for wn in wls:
         if len(f"wl:{wn}".encode('utf-8')) > 64:
             continue
-        count = len(user_data[user]["watchlists"][wn])
+        count = len(wls[wn])
         if edit_mode:
             rows.append([InlineKeyboardButton(
                 f"Delete {wn}?", callback_data=f"dwl:{wn}")])
@@ -414,12 +532,12 @@ def build_watchlist_select_keyboard(user: int, edit_mode: bool = False) -> Inlin
     return InlineKeyboardMarkup(rows)
 
 
-def build_rating_keyboard(movie_id: int, action_prefix: str = "rate") -> InlineKeyboardMarkup:
-    row1 = [InlineKeyboardButton(str(i), callback_data=f"{action_prefix}:{movie_id}:{i}")
+def build_rating_keyboard(media_id: int, media_type: str, action_prefix: str = "rate") -> InlineKeyboardMarkup:
+    row1 = [InlineKeyboardButton(str(i), callback_data=f"{action_prefix}:{media_type}:{media_id}:{i}")
             for i in range(1, 6)]
-    row2 = [InlineKeyboardButton(str(i), callback_data=f"{action_prefix}:{movie_id}:{i}")
+    row2 = [InlineKeyboardButton(str(i), callback_data=f"{action_prefix}:{media_type}:{media_id}:{i}")
             for i in range(6, 11)]
-    row3 = [InlineKeyboardButton("Skip", callback_data=f"{action_prefix}:{movie_id}:0")]
+    row3 = [InlineKeyboardButton("Skip", callback_data=f"{action_prefix}:{media_type}:{media_id}:0")]
     return InlineKeyboardMarkup([row1, row2, row3])
 
 
@@ -456,9 +574,9 @@ def build_services_keyboard(user: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
-def build_genre_picker_keyboard(selected_genres: set) -> InlineKeyboardMarkup:
+def build_genre_picker_keyboard(selected_genres: set, mode="movie") -> InlineKeyboardMarkup:
     rows = []
-    genre_items = sorted(genre_dict.items(), key=lambda x: x[1])
+    genre_items = sorted(get_genre_dict(mode).items(), key=lambda x: x[1])
     for i in range(0, len(genre_items), 2):
         row = []
         for gid, gname in genre_items[i:i + 2]:
@@ -473,8 +591,8 @@ def build_genre_picker_keyboard(selected_genres: set) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
-async def send_movie_message(update: Update, caption: str, poster_path, movie_id: int, user: int):
-    keyboard = build_movie_keyboard(movie_id, user)
+async def send_movie_message(update: Update, caption: str, poster_path, media_id: int, user: int, mode=None):
+    keyboard = build_media_keyboard(media_id, user, mode=mode)
     escaped_caption = esc(caption)
     if poster_path:
         return await update.message.reply_photo(
@@ -491,14 +609,21 @@ async def send_movie_message(update: Update, caption: str, poster_path, movie_id
         )
 
 
-async def send_movie_list(bot, chat_id, header: str, movies_info, detail_action: str = "det"):
-    """Send a chunked itemized list of movies with expand/collapse buttons.
+_CHUNK_MOVIES_MAX = 200
 
-    movies_info: list of (movie_id, title, description) tuples
-    detail_action: callback action prefix for movie buttons (default "det")
+async def send_movie_list(bot, chat_id, header: str, movies_info, detail_action: str = "det", media_type: str = "m"):
+    """Send a chunked itemized list with expand/collapse buttons.
+
+    movies_info: list of (media_id, title, description) tuples
+    detail_action: callback action prefix for detail buttons (default "det")
+    media_type: "m" or "tv" for callback data
     Returns list of sent Message objects.
     """
     global _chunk_id_counter
+    if len(_chunk_movies) > _CHUNK_MOVIES_MAX:
+        oldest_keys = sorted(_chunk_movies.keys())[:len(_chunk_movies) - _CHUNK_MOVIES_MAX]
+        for k in oldest_keys:
+            del _chunk_movies[k]
     chunk_text = header + "\n"
     chunk_movies_list = []
     max_size = 4096
@@ -508,8 +633,8 @@ async def send_movie_list(bot, chat_id, header: str, movies_info, detail_action:
         if len(chunk_text) + len(line) > max_size and chunk_movies_list:
             cid = _chunk_id_counter
             _chunk_id_counter += 1
-            _chunk_movies[cid] = (chunk_movies_list, detail_action)
-            kb = build_chunk_keyboard(cid, chunk_movies_list, expanded=False)
+            _chunk_movies[cid] = (chunk_movies_list, detail_action, media_type)
+            kb = build_chunk_keyboard(cid, chunk_movies_list, expanded=False, media_type=media_type)
             sent.append(await bot.send_message(
                 chat_id=chat_id,
                 text=esc(chunk_text),
@@ -524,12 +649,12 @@ async def send_movie_list(bot, chat_id, header: str, movies_info, detail_action:
         if len(chunk_movies_list) == 1:
             mid, m_title = chunk_movies_list[0]
             kb = InlineKeyboardMarkup([[InlineKeyboardButton(
-                m_title, callback_data=f"{detail_action}:{mid}")]])
+                m_title, callback_data=f"{detail_action}:{media_type}:{mid}")]])
         else:
             cid = _chunk_id_counter
             _chunk_id_counter += 1
-            _chunk_movies[cid] = (chunk_movies_list, detail_action)
-            kb = build_chunk_keyboard(cid, chunk_movies_list, expanded=False)
+            _chunk_movies[cid] = (chunk_movies_list, detail_action, media_type)
+            kb = build_chunk_keyboard(cid, chunk_movies_list, expanded=False, media_type=media_type)
         sent.append(await bot.send_message(
             chat_id=chat_id,
             text=esc(chunk_text),
@@ -573,22 +698,22 @@ async def show_my_providers(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 
 
-async def add_to_watchlist_helper(watchlist, movie_id, user, update: Update):
-    err_msg = is_valid_movie_id(movie_id)
+async def add_to_watchlist_helper(watchlist, media_id, user, update: Update):
+    mode = user_data[user].get("mode", "movie")
+    err_msg = is_valid_media_id(media_id, mode)
     if err_msg:
-        await send_back_text(update, f'The provided movie id is invalid: ' + err_msg)
+        await send_back_text(update, f'The provided ID is invalid: ' + err_msg)
         return
-    movie_id = int(movie_id)
-    # Check if the movie is already in the watchlist
-    already_in = is_in_any_watchlist(movie_id, user)
+    media_id = int(media_id)
+    already_in = is_in_any_watchlist(media_id, user, mode=mode)
     if already_in:
-        await send_back_text(update, f'This movie is already in your "{already_in}" watchlist.')
+        await send_back_text(update, f'Already in your "{already_in}" watchlist.')
     else:
-        if movie_id in user_data[user]["watched"]:
-            await send_back_text(update, "Warning: you have already seen this movie!")
-        user_data[user]["watchlists"][watchlist].append(movie_id)
+        if media_id in user_data[user]["watched"][mode]:
+            await send_back_text(update, "Warning: you have already watched this!")
+        user_data[user]["watchlists"][mode][watchlist].append(media_id)
         save_user_data()
-        await send_back_text(update, 'Movie added to watchlist.')
+        await send_back_text(update, 'Added to watchlist.')
 
 
 async def add_to_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -598,18 +723,19 @@ async def add_to_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
 
     if not context.args:
-        await send_back_text(update, 'Please provide the movie ID.')
+        await send_back_text(update, 'Please provide the ID.')
         return
 
+    mode = user_data[user].get("mode", "movie")
     watchlist = "normal"
     if len(context.args) == 2:
         watchlist = context.args[1]
-    if watchlist not in user_data[user]["watchlists"]:
+    if watchlist not in user_data[user]["watchlists"][mode]:
         await send_back_text(update, f'Info: creating new watchlist "{watchlist}"')
-        user_data[user]["watchlists"][watchlist] = []
+        user_data[user]["watchlists"][mode][watchlist] = []
 
-    movie_id = context.args[0]
-    await add_to_watchlist_helper(watchlist, movie_id, user, update)
+    media_id = context.args[0]
+    await add_to_watchlist_helper(watchlist, media_id, user, update)
 
 
 async def add_to_trash_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -619,11 +745,11 @@ async def add_to_trash_watchlist(update: Update, context: ContextTypes.DEFAULT_T
         return
 
     if not context.args:
-        await send_back_text(update, 'Please provide the movie ID.')
+        await send_back_text(update, 'Please provide the ID.')
         return
 
-    movie_id = context.args[0]
-    await add_to_watchlist_helper("trash", movie_id, user, update)
+    media_id = context.args[0]
+    await add_to_watchlist_helper("trash", media_id, user, update)
 
 
 async def add_to_watched(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -633,21 +759,23 @@ async def add_to_watched(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     if not context.args:
-        await send_back_text(update, 'Please provide the movie ID.')
+        await send_back_text(update, 'Please provide the ID.')
         return
 
-    movie_id = context.args[0]
-    err_msg = is_valid_movie_id(movie_id)
+    mode = user_data[user].get("mode", "movie")
+    mt = _mode_to_type(mode)
+    media_id = context.args[0]
+    err_msg = is_valid_media_id(media_id, mode)
     if err_msg:
-        await send_back_text(update, f'The provided movie id is invalid: ' + err_msg)
+        await send_back_text(update, f'The provided ID is invalid: ' + err_msg)
         return
-    movie_id = int(movie_id)
-    if movie_id in user_data[user]["watched"]:
-        await send_back_text(update, 'Movie was already marked as watched.')
+    media_id = int(media_id)
+    if media_id in user_data[user]["watched"][mode]:
+        await send_back_text(update, 'Already marked as watched.')
         return
-    keyboard = build_rating_keyboard(movie_id)
+    keyboard = build_rating_keyboard(media_id, mt)
     await update.message.reply_text(
-        "Rate this movie (1\u201310):",
+        "Rate this (1\u201310):",
         reply_markup=keyboard)
 
 
@@ -658,33 +786,36 @@ async def remove_from_watchlist(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     if not context.args:
-        await send_back_text(update, 'Please provide the movie ID.')
+        await send_back_text(update, 'Please provide the ID.')
         return
 
-    movie_id = context.args[0]
-    err_msg = is_valid_movie_id(movie_id)
+    mode = user_data[user].get("mode", "movie")
+    media_id = context.args[0]
+    err_msg = is_valid_media_id(media_id, mode)
     if err_msg:
-        await send_back_text(update, f'The provided movie id is invalid: ' + err_msg)
+        await send_back_text(update, f'The provided ID is invalid: ' + err_msg)
         return
-    movie_id = int(movie_id)
+    media_id = int(media_id)
     removed_smth = False
-    for _, w in user_data[user]["watchlists"].items():
-        if movie_id in w:
-            w.remove(movie_id)
+    for _, w in user_data[user]["watchlists"][mode].items():
+        if media_id in w:
+            w.remove(media_id)
             removed_smth = True
     if removed_smth:
         save_user_data()
-        await send_back_text(update, 'Movie removed from watchlist.')
+        await send_back_text(update, 'Removed from watchlist.')
     else:
-        await send_back_text(update, 'This movie is not in your watchlist.')
+        await send_back_text(update, 'Not in any watchlist.')
 
 
 async def _do_recommend(bot, chat_id, user, watchlist, genre_filter=None):
     """Core recommendation logic. genre_filter is a set of genre IDs or None for all."""
-    # Sources: watchlist movies (weight 1.0) + top 20 highest-rated watched movies
-    sources = [(mid, 1.0) for mid in user_data[user]["watchlists"][watchlist]]
+    mode = user_data[user].get("mode", "movie")
+    mt = _mode_to_type(mode)
+    api = get_api(mode)
+    sources = [(mid, 1.0) for mid in user_data[user]["watchlists"][mode][watchlist]]
     rated_watched = sorted(
-        [(mid, r) for mid, r in user_data[user]["watched"].items()
+        [(mid, r) for mid, r in user_data[user]["watched"][mode].items()
          if r is not None and r >= 7],
         key=lambda x: -x[1])[:20]
     sources.extend((mid, rating / 10.0) for mid, rating in rated_watched)
@@ -692,37 +823,37 @@ async def _do_recommend(bot, chat_id, user, watchlist, genre_filter=None):
     if not sources:
         await bot.send_message(
             chat_id,
-            esc(f'Your "{watchlist}" watchlist is empty and you have no highly-rated watched movies.'),
+            esc(f'Your "{watchlist}" watchlist is empty and you have no highly-rated watched items.'),
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=MAIN_KEYBOARD)
+            reply_markup=get_main_keyboard(user))
         return
 
     total = len(sources)
 
     def query_recommendations(source):
-        movie_id, weight = source
+        source_id, weight = source
         available_recommendations = []
-        results = movie.recommendations(movie_id)
-        movies = results["results"]
-        for m in movies:
-            # Genre filter: skip if movie doesn't match any selected genre
+        results = api.recommendations(source_id)
+        items = results["results"]
+        for m in items:
             if genre_filter:
-                movie_genres = set(m.get("genre_ids", []))
-                if not movie_genres.intersection(genre_filter):
+                item_genres = set(m.get("genre_ids", []))
+                if not item_genres.intersection(genre_filter):
                     continue
-            in_watchlist = is_in_any_watchlist(m["id"], user)
-            if not in_watchlist and m["id"] not in user_data[user]["watched"]:
-                available, provider = is_available_for_free(
-                    user_data[user]["providers"], m["id"], user_data[user]["region"])
+            in_watchlist = is_in_any_watchlist(m["id"], user, mode=mode)
+            if not in_watchlist and m["id"] not in user_data[user]["watched"][mode]:
+                available, prov = is_available_for_free(
+                    user_data[user]["providers"], m["id"], user_data[user]["region"], mode=mode)
                 if available:
                     popularity, poster, desc, mid = extract_movie_info(
-                        m, skip_trailer=True)
+                        m, skip_trailer=True, mode=mode)
+                    title = m.get("title") or m.get("name") or "Unknown"
                     available_recommendations.append(
-                        (popularity, poster, desc, provider, mid, m["title"], weight))
+                        (popularity, poster, desc, prov, mid, title, weight))
         return available_recommendations
 
     def do_recommend(tick):
-        num_threads = multiprocessing.cpu_count()
+        num_threads = min(multiprocessing.cpu_count(), 8)
         all_recs = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=num_threads) as executor:
             for result in executor.map(query_recommendations, sources):
@@ -733,7 +864,6 @@ async def _do_recommend(bot, chat_id, user, watchlist, genre_filter=None):
     available_recommendations = await _with_progress_bar(
         bot, chat_id, "Finding recommendations...", total, do_recommend)
 
-    # Sum weights per recommended movie (weighted by source ratings)
     id_scores = {}
     for item in available_recommendations:
         mid = item[4]
@@ -742,7 +872,6 @@ async def _do_recommend(bot, chat_id, user, watchlist, genre_filter=None):
     def custom_sort_key(item):
         return (-id_scores[item[4]], -item[0])
 
-    # Make entries unique by movie ID
     seen_ids = set()
     unique_tuples = []
     for tuple_item in available_recommendations:
@@ -755,19 +884,20 @@ async def _do_recommend(bot, chat_id, user, watchlist, genre_filter=None):
     num_rec = min(50, len(available_recommendations))
     if available_recommendations:
         movies_info = []
-        for _, poster_path, caption, provider, mid, title, _ in available_recommendations[:num_rec]:
-            provider_str = create_available_at_str(provider)
+        for _, poster_path, caption, prov, mid, title, _ in available_recommendations[:num_rec]:
+            provider_str = create_available_at_str(prov)
             movies_info.append((mid, title, caption + "\n" + provider_str))
+        label = "Recommended based on" if mode == "movie" else "Recommended shows based on"
         await send_movie_list(
             bot, chat_id,
-            f'Recommended movies based on your "{watchlist}" watchlist:',
-            movies_info)
+            f'{label} your "{watchlist}" watchlist:',
+            movies_info, media_type=mt)
     else:
         await bot.send_message(
             chat_id,
             esc(f'No recommendations found based on your "{watchlist}" watchlist.'),
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=MAIN_KEYBOARD)
+            reply_markup=get_main_keyboard(user))
 
 
 async def recommend(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -776,16 +906,17 @@ async def recommend(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await unauthorized_msg(update)
         return
 
+    mode = user_data[user].get("mode", "movie")
     watchlist = "normal"
     if context.args:
         watchlist = context.args[0]
 
-    if watchlist not in user_data[user]["watchlists"]:
+    if watchlist not in user_data[user]["watchlists"][mode]:
         await send_back_text(update, f'Watchlist "{watchlist}" not found.')
         return
 
     _rec_genre_filter[user] = {"watchlist": watchlist, "genres": set()}
-    keyboard = build_genre_picker_keyboard(set())
+    keyboard = build_genre_picker_keyboard(set(), mode=mode)
     await update.message.reply_text(
         "Filter recommendations by genre (or skip for all):",
         reply_markup=keyboard)
@@ -797,53 +928,63 @@ async def check_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await unauthorized_msg(update)
         return
 
-    def fetch_movie_details(movie_id):
-        details = movie.details(
-            movie_id, append_to_response="watch/providers")
+    my_providers = user_data[user]["providers"]
+    if not my_providers:
+        await send_back_text(update, "Set up your streaming services first with /services.")
+        return
+
+    mode = user_data[user].get("mode", "movie")
+    mt = _mode_to_type(mode)
+    api = get_api(mode)
+
+    def fetch_details(media_id):
+        details = api.details(
+            media_id, append_to_response="watch/providers")
         providers = _parse_providers_from_details(
             details, user_data[user]["region"])
         avail, matched = _match_providers(my_providers, providers)
         if avail:
-            return (movie_id, matched, details)
+            return (media_id, matched, details)
         return None
 
-    my_providers = user_data[user]["providers"]
     bot = update.get_bot()
     chat_id = update.message.chat_id
-    total = sum(len(w) for w in user_data[user]["watchlists"].values())
+    wls = user_data[user]["watchlists"][mode]
+    total = sum(len(w) for w in wls.values())
 
-    watchlists_snapshot = list(user_data[user]["watchlists"].items())
+    watchlists_snapshot = list(wls.items())
 
     def do_check(tick):
-        num_threads = multiprocessing.cpu_count()
-        available_movies = []
+        num_threads = min(multiprocessing.cpu_count(), 8)
+        available_items = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=num_threads) as executor:
             for wn, w in watchlists_snapshot:
                 results = []
-                for r in executor.map(fetch_movie_details, w):
+                for r in executor.map(fetch_details, w):
                     if r:
                         results.append(r)
                     tick()
-                available_movies.append((wn, results))
-        return available_movies
+                available_items.append((wn, results))
+        return available_items
 
-    available_movies = await _with_progress_bar(
+    available_items = await _with_progress_bar(
         bot, chat_id, "Checking streaming availability...", total, do_check)
 
-    for wn, movies in available_movies:
-        if movies:
+    for wn, items in available_items:
+        if items:
             movies_info = []
-            for movie_id, provider, details in movies:
+            for media_id, prov, details in items:
                 _, _, desc, mid = extract_movie_info(
-                    details, skip_trailer=True)
-                provider_str = create_available_at_str(provider)
-                movies_info.append((mid, details["title"], desc + "\n" + provider_str))
+                    details, skip_trailer=True, mode=mode)
+                title = details.get("title") or details.get("name") or "Unknown"
+                provider_str = create_available_at_str(prov)
+                movies_info.append((mid, title, desc + "\n" + provider_str))
             await send_movie_list(
                 update.get_bot(), update.message.chat_id,
-                f'Movies on your {wn} watchlist available on streaming services:',
-                movies_info)
+                f'Items on your {wn} watchlist available on streaming services:',
+                movies_info, media_type=mt)
         else:
-            await send_back_text(update, f'None of the movies on your {wn} watchlist are available on streaming services.')
+            await send_back_text(update, f'None of the items on your {wn} watchlist are available on streaming services.')
 
 
 async def popular_movies(update: Update, context: CallbackContext) -> None:
@@ -852,47 +993,54 @@ async def popular_movies(update: Update, context: CallbackContext) -> None:
         await unauthorized_msg(update)
         return
 
-    # Get currently popular movies
+    if not user_data[user]["providers"]:
+        await send_back_text(update, "Set up your streaming services first with /services.")
+        return
+
+    mode = user_data[user].get("mode", "movie")
+    mt = _mode_to_type(mode)
+    api = get_api(mode)
+    label = "Popular movies" if mode == "movie" else "Popular TV shows"
+
     status_msg = await update.message.reply_text(
-        "Finding popular movies...", reply_markup=MAIN_KEYBOARD)
+        f"Finding {label.lower()}...", reply_markup=get_main_keyboard(user))
     target_count = 10
     page = 1
-    results = movie.popular(page=page)
+    results = api.popular(page=page)
     total_pages = results["total_pages"]
-    # Phase 1: collect candidates (skip watched)
     candidates = []
     max_candidates = target_count * 3
     while page < total_pages and len(candidates) < max_candidates:
         if page != 1:
-            results = movie.popular(page=page)
+            results = api.popular(page=page)
         for m in results["results"]:
-            if m["id"] not in user_data[user]["watched"]:
+            if m["id"] not in user_data[user]["watched"][mode]:
                 candidates.append(m)
         page += 1
 
-    # Phase 2: parallel availability checks
     my_providers = user_data[user]["providers"]
     user_region = user_data[user]["region"]
 
-    def check_popular_movie(m):
-        available, provider = is_available_for_free(
-            my_providers, m["id"], user_region)
+    def check_popular_item(m):
+        available, prov = is_available_for_free(
+            my_providers, m["id"], user_region, mode=mode)
         if available:
-            _, poster, desc, mid = extract_movie_info(m, skip_trailer=True)
-            return (mid, m["title"], desc, provider)
+            _, poster, desc, mid = extract_movie_info(m, skip_trailer=True, mode=mode)
+            title = m.get("title") or m.get("name") or "Unknown"
+            return (mid, title, desc, prov)
         return None
 
-    num_threads = multiprocessing.cpu_count()
-    pop_movies = []
+    num_threads = min(multiprocessing.cpu_count(), 8)
+    pop_items = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=num_threads) as executor:
-        futures = [executor.submit(check_popular_movie, m) for m in candidates]
+        futures = [executor.submit(check_popular_item, m) for m in candidates]
         for future in futures:
             if future.cancelled():
                 continue
             result = future.result()
             if result:
-                pop_movies.append(result)
-                if len(pop_movies) >= target_count:
+                pop_items.append(result)
+                if len(pop_items) >= target_count:
                     for f in futures:
                         f.cancel()
                     break
@@ -902,17 +1050,17 @@ async def popular_movies(update: Update, context: CallbackContext) -> None:
     except Exception:
         pass
 
-    if pop_movies:
+    if pop_items:
         movies_info = []
-        for mid, title, caption, provider in pop_movies[:target_count]:
-            provider_str = create_available_at_str(provider)
+        for mid, title, caption, prov in pop_items[:target_count]:
+            provider_str = create_available_at_str(prov)
             movies_info.append((mid, title, caption + "\n" + provider_str))
         await send_movie_list(
             update.get_bot(), update.message.chat_id,
-            'Popular movies available on your streaming services:',
-            movies_info)
+            f'{label} available on your streaming services:',
+            movies_info, media_type=mt)
     else:
-        await send_back_text(update, 'No popular movies found on your streaming services.')
+        await send_back_text(update, f'No {label.lower()} found on your streaming services.')
 
 
 def _progress_bar(done, total, width=10):
@@ -969,14 +1117,68 @@ async def _with_progress_bar(bot, chat_id, label, total, work_fn):
 
 
 def _collect_pick_candidates(user, watchlist=None):
-    """Collect movie IDs from one or all watchlists. Returns (candidates, label)."""
+    """Collect IDs from one or all watchlists for current mode. Returns (candidates, label)."""
+    mode = user_data[user].get("mode", "movie")
+    wls = user_data[user]["watchlists"][mode]
     if watchlist:
-        wl = user_data[user]["watchlists"].get(watchlist, [])
+        wl = wls.get(watchlist, [])
         return list(wl), f'"{watchlist}"'
-    all_movies = []
-    for wl in user_data[user]["watchlists"].values():
-        all_movies.extend(wl)
-    return list(set(all_movies)), "your watchlists"
+    all_items = []
+    for wl in wls.values():
+        all_items.extend(wl)
+    return list(set(all_items)), "your watchlists"
+
+
+async def _do_pick(bot, chat_id, user, candidates, label, wl_cb_name):
+    """Shared logic for picking a random available item from candidates.
+    Returns True if an item was sent, False if none available."""
+    mode = user_data[user].get("mode", "movie")
+    mt = _mode_to_type(mode)
+    api = get_api(mode)
+    my_providers = user_data[user]["providers"]
+    user_region = user_data[user]["region"]
+    random.shuffle(candidates)
+
+    picked_mid = None
+    picked_details = None
+    matched_providers = None
+    for mid in candidates:
+        details = api.details(mid, append_to_response="watch/providers")
+        providers = _parse_providers_from_details(details, user_region)
+        avail, matched = _match_providers(my_providers, providers)
+        if avail:
+            picked_mid = mid
+            picked_details = details
+            matched_providers = matched
+            break
+
+    if picked_mid is None:
+        await bot.send_message(
+            chat_id, esc(f'Nothing in {label} is available on your services.'),
+            parse_mode=ParseMode.MARKDOWN_V2, reply_markup=get_main_keyboard(user))
+        return False
+
+    _, poster_path, desc, _ = extract_movie_info(picked_details, mode=mode)
+    desc += "\n" + create_available_at_str(matched_providers)
+    keyboard = build_media_keyboard(picked_mid, user, mode=mode)
+    pick_cb = f"rpick:{wl_cb_name}"
+    if len(pick_cb.encode('utf-8')) <= 64:
+        rows = list(keyboard.inline_keyboard) + [
+            [InlineKeyboardButton("Pick another", callback_data=pick_cb)]]
+        keyboard = InlineKeyboardMarkup(rows)
+    escaped = esc(desc)
+    if poster_path:
+        await bot.send_photo(
+            chat_id, poster_path,
+            caption=escaped,
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=keyboard)
+    else:
+        await bot.send_message(
+            chat_id, escaped,
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=keyboard)
+    return True
 
 
 async def pick_movie(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -985,13 +1187,13 @@ async def pick_movie(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await unauthorized_msg(update)
         return
 
-    my_providers = user_data[user]["providers"]
-    if not my_providers:
+    if not user_data[user]["providers"]:
         await send_back_text(update, "Set up your streaming services first with /services.")
         return
 
+    mode = user_data[user].get("mode", "movie")
     watchlist = context.args[0] if context.args else None
-    if watchlist and watchlist not in user_data[user]["watchlists"]:
+    if watchlist and watchlist not in user_data[user]["watchlists"][mode]:
         await send_back_text(update, f'Watchlist "{watchlist}" not found.')
         return
 
@@ -1000,44 +1202,8 @@ async def pick_movie(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await send_back_text(update, f'{label} is empty.' if watchlist else 'All your watchlists are empty.')
         return
 
-    user_region = user_data[user]["region"]
-    random.shuffle(candidates)
-
-    picked_mid = None
-    matched_providers = None
-    for mid in candidates:
-        details = movie.details(mid, append_to_response="watch/providers")
-        providers = _parse_providers_from_details(details, user_region)
-        avail, matched = _match_providers(my_providers, providers)
-        if avail:
-            picked_mid = mid
-            matched_providers = matched
-            break
-
-    if picked_mid is None:
-        await send_back_text(update, f'No movies in {label} are available on your services.')
-        return
-
-    movie_details = movie.details(picked_mid)
-    _, poster_path, desc, _ = extract_movie_info(movie_details)
-    desc += "\n" + create_available_at_str(matched_providers)
-    keyboard = build_movie_keyboard(picked_mid, user)
-    pick_cb = f"rpick:{watchlist or '*'}"
-    if len(pick_cb.encode('utf-8')) <= 64:
-        rows = list(keyboard.inline_keyboard) + [
-            [InlineKeyboardButton("Pick another", callback_data=pick_cb)]]
-        keyboard = InlineKeyboardMarkup(rows)
-    escaped = esc(desc)
-    if poster_path:
-        await update.message.reply_photo(
-            poster_path, escaped,
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=keyboard)
-    else:
-        await update.message.reply_text(
-            escaped,
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=keyboard)
+    await _do_pick(update.get_bot(), update.message.chat_id, user,
+                   candidates, label, watchlist or '*')
 
 
 async def clear_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1071,7 +1237,7 @@ async def clear_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await bot.send_message(
         chat_id,
         f"Cleared {deleted} messages.",
-        reply_markup=MAIN_KEYBOARD)
+        reply_markup=get_main_keyboard(user))
 
 
 async def fix_keyboard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1079,7 +1245,22 @@ async def fix_keyboard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if check_user_invalid(user):
         await unauthorized_msg(update)
         return
-    await update.message.reply_text("Keyboard restored.", reply_markup=MAIN_KEYBOARD)
+    await update.message.reply_text("Keyboard restored.", reply_markup=get_main_keyboard(user))
+
+
+async def toggle_mode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = get_user_id(update)
+    if check_user_invalid(user):
+        await unauthorized_msg(update)
+        return
+    current = user_data[user].get("mode", "movie")
+    new_mode = "tv" if current == "movie" else "movie"
+    user_data[user]["mode"] = new_mode
+    save_user_data()
+    label = "TV Shows" if new_mode == "tv" else "Movies"
+    await update.message.reply_text(
+        f"Switched to {label} mode.",
+        reply_markup=get_main_keyboard(user))
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1096,13 +1277,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     else:
         await update.message.reply_text(
             'Welcome back to TMDBot! Use /search to search for a movie.',
-            reply_markup=MAIN_KEYBOARD
+            reply_markup=get_main_keyboard(user)
         )
 
 
 async def _send_rate_list(bot, chat_id, user):
     """Build and send the rate list for a user. Returns sent messages."""
-    watched = user_data[user]["watched"]
+    mode = user_data[user].get("mode", "movie")
+    mt = _mode_to_type(mode)
+    api = get_api(mode)
+    watched = user_data[user]["watched"][mode]
     unrated = [(mid, r) for mid, r in watched.items() if r is None]
     rated = sorted(
         [(mid, r) for mid, r in watched.items() if r is not None],
@@ -1110,19 +1294,21 @@ async def _send_rate_list(bot, chat_id, user):
 
     movies_info = []
     for mid, r in unrated + rated:
-        movie_details = movie.details(mid)
-        _, _, desc, _ = extract_movie_info(movie_details, skip_trailer=True)
+        details = api.details(mid)
+        _, _, desc, _ = extract_movie_info(details, skip_trailer=True, mode=mode)
+        title = details.get("title") or details.get("name") or "Unknown"
         rating_str = "unrated" if r is None else f"Your rating: {r}/10"
-        movies_info.append((mid, movie_details["title"], f"{desc}\n{rating_str}"))
+        movies_info.append((mid, title, f"{desc}\n{rating_str}"))
 
     n_unrated = len(unrated)
     n_rated = len(rated)
+    label = "movie" if mode == "movie" else "show"
     if n_unrated > 0:
-        header = f'{n_unrated} unrated, {n_rated} rated movie(s):'
+        header = f'{n_unrated} unrated, {n_rated} rated {label}(s):'
     else:
-        header = f'{n_rated} watched movie(s):'
+        header = f'{n_rated} watched {label}(s):'
     return await send_movie_list(
-        bot, chat_id, header, movies_info, detail_action="rdet")
+        bot, chat_id, header, movies_info, detail_action="rdet", media_type=mt)
 
 
 async def rate_movies(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1131,8 +1317,9 @@ async def rate_movies(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await unauthorized_msg(update)
         return
 
-    if not user_data[user]["watched"]:
-        await send_back_text(update, "You haven't watched any movies yet!")
+    mode = user_data[user].get("mode", "movie")
+    if not user_data[user]["watched"][mode]:
+        await send_back_text(update, "You haven't watched anything in this mode yet!")
         return
 
     # Clean up previous rate list
@@ -1144,20 +1331,24 @@ async def rate_movies(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 async def do_search(update: Update, query: str, user: int) -> None:
-    results = search.movies(query)
+    mode = user_data[user].get("mode", "movie")
+    if mode == "movie":
+        results = search.movies(query)
+    else:
+        results = search.tv_shows(query)
     if results and results["total_results"] > 0:
         await _cleanup_search_results(update.get_bot(), user)
         batch = []
         msgs = await send_back_text(update, f'Search results for "{query}":')
         batch.extend(m.message_id for m in msgs)
-        movies = results["results"]
+        items = results["results"]
         res = []
-        for m in movies:
-            res.append(extract_movie_info(m))
+        for m in items:
+            res.append(extract_movie_info(m, mode=mode))
         sorted_res = sort_by_rating(res)
         show_results = min(5, len(sorted_res))
         for _, poster_path, caption, mid in sorted_res[:show_results]:
-            msg = await send_movie_message(update, caption, poster_path, mid, user)
+            msg = await send_movie_message(update, caption, poster_path, mid, user, mode=mode)
             batch.append(msg.message_id)
         remaining = sorted_res[show_results:]
         if remaining:
@@ -1203,7 +1394,8 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     action = raw.split(":", 1)[0]
 
     if action == "nwl":
-        _pending_new_watchlist[user] = None
+        mode = user_data[user].get("mode", "movie")
+        _pending_new_watchlist[user] = (None, mode)
         await query.answer()
         await query.get_bot().send_message(
             query.message.chat_id,
@@ -1226,28 +1418,42 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     if action == "dwl":
         wl_name = raw.split(":", 1)[1]
         await query.answer()
+        mode = user_data[user].get("mode", "movie")
+        count = len(user_data[user]["watchlists"][mode].get(wl_name, []))
+        if count > 0:
+            confirm_text = f'Delete "{wl_name}"? It contains {count} movie{"s" if count != 1 else ""}.'
+        else:
+            confirm_text = f'Delete "{wl_name}"?'
         confirm_kb = InlineKeyboardMarkup([[
             InlineKeyboardButton("Yes, delete", callback_data=f"dwly:{wl_name}"),
             InlineKeyboardButton("Cancel", callback_data="dwln")
         ]])
-        await query.edit_message_reply_markup(reply_markup=confirm_kb)
+        await query.edit_message_text(
+            text=esc(confirm_text),
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=confirm_kb)
         return
 
     if action == "dwly":
         wl_name = raw.split(":", 1)[1]
-        if wl_name in user_data[user]["watchlists"]:
-            del user_data[user]["watchlists"][wl_name]
+        mode = user_data[user].get("mode", "movie")
+        if wl_name in user_data[user]["watchlists"][mode]:
+            del user_data[user]["watchlists"][mode][wl_name]
             save_user_data()
             await query.answer(f'Deleted "{wl_name}".')
         else:
             await query.answer("Watchlist not found.", show_alert=True)
         keyboard = build_watchlist_select_keyboard(user, edit_mode=True)
-        await query.edit_message_reply_markup(reply_markup=keyboard)
+        await query.edit_message_text(
+            text="Select a watchlist:",
+            reply_markup=keyboard)
         return
 
     if action == "dwln":
         keyboard = build_watchlist_select_keyboard(user, edit_mode=True)
-        await query.edit_message_reply_markup(reply_markup=keyboard)
+        await query.edit_message_text(
+            text="Select a watchlist:",
+            reply_markup=keyboard)
         await query.answer()
         return
 
@@ -1288,7 +1494,8 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             genres.discard(genre_id)
         else:
             genres.add(genre_id)
-        keyboard = build_genre_picker_keyboard(genres)
+        mode = user_data[user].get("mode", "movie")
+        keyboard = build_genre_picker_keyboard(genres, mode=mode)
         await query.edit_message_reply_markup(reply_markup=keyboard)
         await query.answer()
         return
@@ -1298,8 +1505,8 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             await query.answer("Session expired.", show_alert=True)
             return
         state = _rec_genre_filter.pop(user)
-        mode = raw.split(":", 1)[1]
-        genre_filter = state["genres"] if mode == "filter" and state["genres"] else None
+        recgo_mode = raw.split(":", 1)[1]
+        genre_filter = state["genres"] if recgo_mode == "filter" and state["genres"] else None
         await query.answer()
         try:
             await query.message.delete()
@@ -1331,8 +1538,9 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         bot = query.get_bot()
         chat_id = query.message.chat_id
         batch = _search_results[user][1] if user in _search_results else []
+        mode = user_data[user].get("mode", "movie")
         for _, poster_path, caption, mid in next_batch:
-            keyboard = build_movie_keyboard(mid, user)
+            keyboard = build_media_keyboard(mid, user, mode=mode)
             escaped = esc(caption)
             if poster_path:
                 msg = await bot.send_photo(
@@ -1365,16 +1573,21 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             return
         state = _last_watched.pop(user)
         mid = state["mid"]
-        prev_wl = state["watchlist"]
+        undo_mode = state.get("mode", "movie")
+        prev_wls = state.get("watchlists", [])
+        # Backwards compat: old state used singular "watchlist"
+        if not prev_wls and state.get("watchlist"):
+            prev_wls = [state["watchlist"]]
         prev_rating = state["prev_rating"]
         # Restore previous watched state
         if prev_rating == "absent":
-            user_data[user]["watched"].pop(mid, None)
+            user_data[user]["watched"][undo_mode].pop(mid, None)
         else:
-            user_data[user]["watched"][mid] = prev_rating
-        # Restore to watchlist if it was in one
-        if prev_wl and prev_wl in user_data[user]["watchlists"]:
-            user_data[user]["watchlists"][prev_wl].append(mid)
+            user_data[user]["watched"][undo_mode][mid] = prev_rating
+        # Restore to all watchlists it was in
+        for wn in prev_wls:
+            if wn in user_data[user]["watchlists"][undo_mode]:
+                user_data[user]["watchlists"][undo_mode][wn].append(mid)
         save_user_data()
         await query.answer("Undone!")
         try:
@@ -1384,7 +1597,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         await query.get_bot().send_message(
             query.message.chat_id,
             "Last watched action undone.",
-            reply_markup=MAIN_KEYBOARD)
+            reply_markup=get_main_keyboard(user))
         # Refresh rate list if open
         if user in _rate_list_messages:
             bot = query.get_bot()
@@ -1396,16 +1609,21 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
 
     if action in ("rate", "rrate"):
         parts = raw.split(":")
-        mid = int(parts[1])
-        rating = int(parts[2]) or None
+        try:
+            mt = parts[1]
+            mid = int(parts[2])
+            rating = int(parts[3]) or None
+        except (ValueError, IndexError):
+            await query.answer("Invalid action.", show_alert=True)
+            return
+        rate_mode = _type_to_mode(mt)
         # Save undo state
-        prev_wl = is_in_any_watchlist(mid, user)
-        prev_rating = user_data[user]["watched"].get(mid, "absent")
-        _last_watched[user] = {"mid": mid, "watchlist": prev_wl, "prev_rating": prev_rating}
-        for _, w in user_data[user]["watchlists"].items():
-            if mid in w:
-                w.remove(mid)
-        user_data[user]["watched"][mid] = rating
+        prev_wls = find_all_watchlists(mid, user, mode=rate_mode)
+        prev_rating = user_data[user]["watched"][rate_mode].get(mid, "absent")
+        _last_watched[user] = {"mid": mid, "watchlists": prev_wls, "prev_rating": prev_rating, "mode": rate_mode}
+        for wn in prev_wls:
+            user_data[user]["watchlists"][rate_mode][wn].remove(mid)
+        user_data[user]["watched"][rate_mode][mid] = rating
         save_user_data()
         if rating:
             await query.answer(f"Rated {rating}/10 and marked as watched.")
@@ -1419,7 +1637,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             await _cleanup_search_results(bot, user)
             await bot.send_message(
                 chat_id, "Marked as watched.",
-                reply_markup=MAIN_KEYBOARD)
+                reply_markup=get_main_keyboard(user))
             await bot.send_message(
                 chat_id, "Undo?",
                 reply_markup=undo_kb)
@@ -1430,7 +1648,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
                 await query.edit_message_reply_markup(reply_markup=None)
             await bot.send_message(
                 chat_id, "Marked as watched.",
-                reply_markup=MAIN_KEYBOARD)
+                reply_markup=get_main_keyboard(user))
             await bot.send_message(
                 chat_id, "Undo?",
                 reply_markup=undo_kb)
@@ -1443,17 +1661,21 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
 
     if action == "wl":
         wl_name = raw.split(":", 1)[1]
-        wl_movies = user_data[user]["watchlists"].get(wl_name, [])
+        mode = user_data[user].get("mode", "movie")
+        wl_movies = user_data[user]["watchlists"][mode].get(wl_name, [])
         if not wl_movies:
             await query.answer(f'"{wl_name}" is empty.', show_alert=True)
             return
         await query.answer()
+        api = get_api(mode)
+        mt = _mode_to_type(mode)
         movies_info = []
         for mid in wl_movies:
-            movie_details = movie.details(mid)
-            _, _, desc, _ = extract_movie_info(movie_details)
-            movies_info.append((mid, movie_details["title"], desc))
-        await send_movie_list(query.get_bot(), query.message.chat_id, f'{wl_name} watchlist:', movies_info)
+            details = api.details(mid)
+            _, _, desc, _ = extract_movie_info(details, mode=mode)
+            title = details.get("title") or details.get("name") or "Unknown"
+            movies_info.append((mid, title, desc))
+        await send_movie_list(query.get_bot(), query.message.chat_id, f'{wl_name} watchlist:', movies_info, media_type=mt)
         return
 
     if action in ("exp", "col"):
@@ -1462,20 +1684,27 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             await query.answer("Session expired.", show_alert=True)
             return
         expanded = action == "exp"
-        chunk_movies_list, det_action = _chunk_movies[cid]
-        kb = build_chunk_keyboard(cid, chunk_movies_list, expanded=expanded, detail_action=det_action)
+        chunk_movies_list, det_action, chunk_mt = _chunk_movies[cid]
+        kb = build_chunk_keyboard(cid, chunk_movies_list, expanded=expanded, detail_action=det_action, media_type=chunk_mt)
         await query.edit_message_reply_markup(reply_markup=kb)
         await query.answer()
         return
 
     if action in ("det", "rdet"):
-        mid = int(raw.split(":", 1)[1])
-        movie_details = movie.details(mid)
-        _, poster_path, desc, _ = extract_movie_info(movie_details)
+        parts = raw.split(":", 2)
+        if len(parts) < 3:
+            await query.answer("Invalid action.", show_alert=True)
+            return
+        det_mt = parts[1]
+        mid = int(parts[2])
+        det_mode = _type_to_mode(det_mt)
+        api = get_api(det_mode)
+        details = api.details(mid)
+        _, poster_path, desc, _ = extract_movie_info(details, mode=det_mode)
         if action == "rdet":
-            keyboard = build_rating_keyboard(mid, action_prefix="rrate")
+            keyboard = build_rating_keyboard(mid, media_type=det_mt, action_prefix="rrate")
         else:
-            keyboard = build_movie_keyboard(mid, user)
+            keyboard = build_media_keyboard(mid, user, mode=det_mode)
         await query.answer()
         bot = query.get_bot()
         chat_id = query.message.chat_id
@@ -1501,122 +1730,13 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         if not candidates:
             await query.answer("Watchlists are empty.", show_alert=True)
             return
-        my_providers = user_data[user]["providers"]
-        user_region = user_data[user]["region"]
-        random.shuffle(candidates)
         await query.answer()
-        bot = query.get_bot()
-        chat_id = query.message.chat_id
-        picked_mid = None
-        matched_providers = None
-        for mid in candidates:
-            details = movie.details(mid, append_to_response="watch/providers")
-            providers = _parse_providers_from_details(details, user_region)
-            avail, matched = _match_providers(my_providers, providers)
-            if avail:
-                picked_mid = mid
-                matched_providers = matched
-                break
-        if picked_mid is None:
-            await bot.send_message(
-                chat_id, esc(f'No available movies in {label}.'),
-                parse_mode=ParseMode.MARKDOWN_V2, reply_markup=MAIN_KEYBOARD)
-            return
-        movie_details = movie.details(picked_mid)
-        _, poster_path, desc, _ = extract_movie_info(movie_details)
-        desc += "\n" + create_available_at_str(matched_providers)
-        keyboard = build_movie_keyboard(picked_mid, user)
-        pick_cb = f"rpick:{wl_name}"
-        if len(pick_cb.encode('utf-8')) <= 64:
-            rows = list(keyboard.inline_keyboard) + [
-                [InlineKeyboardButton("Pick another", callback_data=pick_cb)]]
-            keyboard = InlineKeyboardMarkup(rows)
-        escaped = esc(desc)
-        if poster_path:
-            await bot.send_photo(
-                chat_id, poster_path,
-                caption=escaped,
-                parse_mode=ParseMode.MARKDOWN_V2,
-                reply_markup=keyboard)
-        else:
-            await bot.send_message(
-                chat_id, escaped,
-                parse_mode=ParseMode.MARKDOWN_V2,
-                reply_markup=keyboard)
+        await _do_pick(query.get_bot(), query.message.chat_id, user,
+                       candidates, label, wl_name)
         return
 
-    action, movie_id, watchlist = parse_callback_data(raw)
-
-    if action == "pick":
-        picker_keyboard = build_watchlist_picker_keyboard(movie_id, user)
-        await query.edit_message_reply_markup(reply_markup=picker_keyboard)
-        await query.answer()
-
-    elif action == "back":
-        keyboard = build_movie_keyboard(movie_id, user)
-        await query.edit_message_reply_markup(reply_markup=keyboard)
-        await query.answer()
-
-    elif action == "new":
-        _pending_new_watchlist[user] = movie_id
-        await query.answer()
-        await query.get_bot().send_message(
-            query.message.chat_id,
-            "Enter a name for the new watchlist:",
-            reply_markup=ForceReply(selective=True))
-
-    elif action == "a":
-        already_in = is_in_any_watchlist(movie_id, user)
-        if already_in:
-            await query.answer(f'Already in "{already_in}" watchlist.', show_alert=True)
-        else:
-            if movie_id in user_data[user]["watched"]:
-                await query.answer("Warning: you already watched this!", show_alert=True)
-            else:
-                await query.answer(f'Added to "{watchlist}".')
-            user_data[user]["watchlists"][watchlist].append(movie_id)
-            save_user_data()
-            if _is_search_message(user, query.message.message_id):
-                await _cleanup_search_results(query.get_bot(), user)
-                await query.get_bot().send_message(
-                    query.message.chat_id,
-                    f'Added to "{watchlist}".',
-                    reply_markup=MAIN_KEYBOARD)
-            else:
-                new_keyboard = build_movie_keyboard(movie_id, user)
-                await query.edit_message_reply_markup(reply_markup=new_keyboard)
-
-    elif action == "rm":
-        removed = False
-        for _, w in user_data[user]["watchlists"].items():
-            if movie_id in w:
-                w.remove(movie_id)
-                removed = True
-        if removed:
-            save_user_data()
-            await query.answer("Removed from watchlist.")
-            if _is_search_message(user, query.message.message_id):
-                await _cleanup_search_results(query.get_bot(), user)
-                await query.get_bot().send_message(
-                    query.message.chat_id,
-                    "Removed from watchlist.",
-                    reply_markup=MAIN_KEYBOARD)
-            else:
-                new_keyboard = build_movie_keyboard(movie_id, user)
-                await query.edit_message_reply_markup(reply_markup=new_keyboard)
-        else:
-            await query.answer("Not in any watchlist.", show_alert=True)
-
-    elif action == "w":
-        if movie_id in user_data[user]["watched"] and user_data[user]["watched"][movie_id] is not None:
-            await query.answer("Already marked as watched.", show_alert=True)
-        else:
-            rating_kb = build_rating_keyboard(movie_id)
-            await query.edit_message_reply_markup(reply_markup=rating_kb)
-            await query.answer("Rate this movie:")
-
-    elif action == "sp":
-        provider_index = movie_id  # reused field holds the index
+    if action == "sp":
+        provider_index = int(raw.split(":", 1)[1])
         all_providers = get_all_movie_provider(user_data[user]["region"])
         if provider_index < 0 or provider_index >= len(all_providers):
             await query.answer("Invalid provider.", show_alert=True)
@@ -1633,6 +1753,82 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         save_user_data()
         keyboard = build_services_keyboard(user)
         await query.edit_message_reply_markup(reply_markup=keyboard)
+        return
+
+    action, media_type, movie_id, watchlist = parse_callback_data(raw)
+    if movie_id is None:
+        await query.answer("Invalid action.", show_alert=True)
+        return
+
+    cb_mode = _type_to_mode(media_type)
+
+    if action == "pick":
+        picker_keyboard = build_watchlist_picker_keyboard(movie_id, user, mode=cb_mode)
+        await query.edit_message_reply_markup(reply_markup=picker_keyboard)
+        await query.answer()
+
+    elif action == "back":
+        keyboard = build_media_keyboard(movie_id, user, mode=cb_mode)
+        await query.edit_message_reply_markup(reply_markup=keyboard)
+        await query.answer()
+
+    elif action == "new":
+        _pending_new_watchlist[user] = (movie_id, cb_mode)
+        await query.answer()
+        await query.get_bot().send_message(
+            query.message.chat_id,
+            "Enter a name for the new watchlist:",
+            reply_markup=ForceReply(selective=True))
+
+    elif action == "a":
+        already_in = is_in_any_watchlist(movie_id, user, mode=cb_mode)
+        if already_in:
+            await query.answer(f'Already in "{already_in}" watchlist.', show_alert=True)
+        else:
+            if movie_id in user_data[user]["watched"][cb_mode]:
+                await query.answer("Warning: you already watched this!", show_alert=True)
+            else:
+                await query.answer(f'Added to "{watchlist}".')
+            user_data[user]["watchlists"][cb_mode][watchlist].append(movie_id)
+            save_user_data()
+            if _is_search_message(user, query.message.message_id):
+                await _cleanup_search_results(query.get_bot(), user)
+                await query.get_bot().send_message(
+                    query.message.chat_id,
+                    f'Added to "{watchlist}".',
+                    reply_markup=get_main_keyboard(user))
+            else:
+                new_keyboard = build_media_keyboard(movie_id, user, mode=cb_mode)
+                await query.edit_message_reply_markup(reply_markup=new_keyboard)
+
+    elif action == "rm":
+        removed = False
+        for _, w in user_data[user]["watchlists"][cb_mode].items():
+            if movie_id in w:
+                w.remove(movie_id)
+                removed = True
+        if removed:
+            save_user_data()
+            await query.answer("Removed from watchlist.")
+            if _is_search_message(user, query.message.message_id):
+                await _cleanup_search_results(query.get_bot(), user)
+                await query.get_bot().send_message(
+                    query.message.chat_id,
+                    "Removed from watchlist.",
+                    reply_markup=get_main_keyboard(user))
+            else:
+                new_keyboard = build_media_keyboard(movie_id, user, mode=cb_mode)
+                await query.edit_message_reply_markup(reply_markup=new_keyboard)
+        else:
+            await query.answer("Not in any watchlist.", show_alert=True)
+
+    elif action == "w":
+        if movie_id in user_data[user]["watched"][cb_mode] and user_data[user]["watched"][cb_mode][movie_id] is not None:
+            await query.answer("Already marked as watched.", show_alert=True)
+        else:
+            rating_kb = build_rating_keyboard(movie_id, media_type=media_type)
+            await query.edit_message_reply_markup(reply_markup=rating_kb)
+            await query.answer("Rate this:")
 
     else:
         await query.answer("Unknown action.", show_alert=True)
@@ -1648,32 +1844,33 @@ async def reply_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     # Handle pending search
     if user in _pending_search:
-        _pending_search.pop(user)
+        _pending_search.pop(user, None)
         if text:
             await do_search(update, text, user)
         return
 
     # Handle pending new watchlist name
     if user in _pending_new_watchlist:
-        movie_id = _pending_new_watchlist.pop(user)
+        movie_id, nwl_mode = _pending_new_watchlist.pop(user, (None, "movie"))
         if not text:
             await send_back_text(update, "Watchlist name cannot be empty.")
             return
-        if text in user_data[user]["watchlists"]:
+        if text in user_data[user]["watchlists"][nwl_mode]:
             await send_back_text(update, f'Watchlist "{text}" already exists.')
             return
-        user_data[user]["watchlists"][text] = []
+        user_data[user]["watchlists"][nwl_mode][text] = []
         if movie_id is None:
             save_user_data()
             await send_back_text(update, f'Created watchlist "{text}".')
         else:
-            already_in = is_in_any_watchlist(movie_id, user)
+            already_in = is_in_any_watchlist(movie_id, user, mode=nwl_mode)
             if already_in:
-                await send_back_text(update, f'Movie is already in your "{already_in}" watchlist.')
+                label = "show" if nwl_mode == "tv" else "movie"
+                await send_back_text(update, f'Already in your "{already_in}" watchlist.')
             else:
-                user_data[user]["watchlists"][text].append(movie_id)
+                user_data[user]["watchlists"][nwl_mode][text].append(movie_id)
                 save_user_data()
-                await send_back_text(update, f'Created watchlist "{text}" and added the movie.')
+                await send_back_text(update, f'Created watchlist "{text}" and added it.')
         return
 
 
@@ -1692,10 +1889,12 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
     logger.error("Exception while handling an update:", exc_info=context.error)
     try:
         if isinstance(update, Update) and update.effective_chat:
+            user = get_user_id(update) if update.effective_user else None
+            kb = get_main_keyboard(user) if user else None
             await context.bot.send_message(
                 update.effective_chat.id,
                 "An unexpected error occurred. Please try again.",
-                reply_markup=MAIN_KEYBOARD)
+                reply_markup=kb)
     except Exception:
         logger.error("Failed to send error message to user:", exc_info=True)
 
@@ -1703,18 +1902,19 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 async def post_init(application):
     await application.bot.set_my_commands(commands=[
         BotCommand("start", "OKAAAAY LETS GO!!!"),
-        BotCommand("search", "Search a movie based on given keywords"),
+        BotCommand("search", "Search by keywords"),
         BotCommand("list", "Browse your watchlists"),
-        BotCommand("add", "Add movie to your watchlist"),
-        BotCommand("tadd", "Add movie to your trash watchlist"),
-        BotCommand("watched", "Mark a movie as watched"),
-        BotCommand("remove", "Remove movie from all watchlists"),
-        BotCommand("rate", "Rate or re-rate watched movies"),
+        BotCommand("add", "Add to your watchlist"),
+        BotCommand("tadd", "Add to your trash watchlist"),
+        BotCommand("watched", "Mark as watched"),
+        BotCommand("remove", "Remove from all watchlists"),
+        BotCommand("rate", "Rate or re-rate watched items"),
         BotCommand("services", "Manage my streaming services"),
-        BotCommand("check", "Check the availability of movies in your watchlist"),
-        BotCommand("recommend", "Find recommendations based on your selected watchlist"),
-        BotCommand("popular", "Show currently popular movies available at your streaming services"),
-        BotCommand("pick", "Pick a random movie available on your services"),
+        BotCommand("check", "Check streaming availability for your watchlist"),
+        BotCommand("recommend", "Get recommendations based on your watchlist"),
+        BotCommand("popular", "Show popular titles on your streaming services"),
+        BotCommand("pick", "Pick a random title from your watchlists"),
+        BotCommand("mode", "Switch between Movies and TV mode"),
     ])
 
 
@@ -1735,12 +1935,17 @@ def main():
     application.add_handler(CommandHandler(['recommend', 'r'], recommend))
     application.add_handler(CommandHandler(['popular', 'pop'], popular_movies))
     application.add_handler(CommandHandler(['pick', 'p'], pick_movie))
+    application.add_handler(CommandHandler(['mode', 'm'], toggle_mode))
     application.add_handler(CommandHandler('clear', clear_chat))
     application.add_handler(CommandHandler('fix', fix_keyboard))
     application.add_handler(CallbackQueryHandler(button_callback_handler))
     application.add_handler(MessageHandler(
         filters.TEXT & ~filters.COMMAND & filters.REPLY,
         reply_handler
+    ))
+    application.add_handler(MessageHandler(
+        filters.Regex(f"^({re.escape(_MODE_SWITCH_TV)}|{re.escape(_MODE_SWITCH_MOVIE)})$"),
+        toggle_mode
     ))
     application.add_handler(MessageHandler(
         filters.TEXT & ~filters.COMMAND & ~filters.REPLY,

@@ -1,16 +1,17 @@
 # TMDBot
 
-A Telegram bot for discovering and managing movies using [The Movie Database (TMDb)](https://www.themoviedb.org/) API.
+A Telegram bot for discovering and managing movies and TV shows using [The Movie Database (TMDb)](https://www.themoviedb.org/) API.
 
 ## Features
 
-- **Search** movies by title with paginated results
-- **Watchlists** -- create multiple named watchlists to organize movies
-- **Streaming availability** -- check which watchlist movies are available on your streaming services
-- **Recommendations** -- get personalized suggestions based on your watchlist and rated movies, with optional genre filtering
-- **Popular movies** -- browse currently popular movies available on your services
-- **Random picker** -- pick a random movie from any watchlist
-- **Rating** -- rate watched movies (1-10) and browse/re-rate your history
+- **Movies & TV** -- per-user mode switch between Movies and TV Shows, with separate watchlists for each
+- **Search** by title with paginated results
+- **Watchlists** -- create multiple named watchlists to organize titles
+- **Streaming availability** -- check which watchlist items are available on your streaming services
+- **Recommendations** -- get personalized suggestions based on your watchlist and rated items, with optional genre filtering
+- **Popular titles** -- browse currently popular movies/shows available on your services
+- **Random picker** -- pick a random title from any watchlist
+- **Rating** -- rate watched titles (1-10) and browse/re-rate your history
 - **Onboarding** -- region and streaming service setup for new users
 
 ## Setup
@@ -83,3 +84,4 @@ python tmdbot.py [settings.yaml] [user_data.yaml]
 | `/recommend` | `/r` | Get recommendations based on a watchlist |
 | `/popular` | `/pop` | Show popular movies on your streaming services |
 | `/pick` | `/p` | Pick a random movie from a watchlist |
+| `/mode` | `/m` | Switch between Movies and TV mode |
