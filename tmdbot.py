@@ -1583,8 +1583,10 @@ async def search_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     if not context.args:
         _pending_search[user] = True
+        mode = user_data[user].get("mode", "movie")
+        label = "movie" if mode == "movie" else "TV show"
         await update.message.reply_text(
-            "Enter a movie title to search:",
+            f"Enter a {label} title to search:",
             reply_markup=ForceReply(selective=True))
         return
 
