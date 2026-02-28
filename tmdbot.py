@@ -3,6 +3,7 @@ import os
 import re
 import asyncio
 import time
+import datetime
 import yaml
 import logging
 import random
@@ -37,6 +38,7 @@ provider = Provider()
 
 def get_api(mode):
     return movie if mode == "movie" else tv
+
 
 # File path for storing the user data
 USER_DATA_FILE = 'user_data.yaml' if len(sys.argv) < 3 else sys.argv[2]
@@ -91,6 +93,7 @@ def user_data_initialize():
             user_data[user]["providers"] = []
             user_data[user]["onboarded"] = False
             user_data[user]["mode"] = "movie"
+            user_data[user]["tv_season_counts"] = {}
         else:
             ud = user_data[user]
             # Migrate mode
@@ -107,6 +110,9 @@ def user_data_initialize():
             if "watched" in ud and "movie" not in ud["watched"]:
                 old_watched = ud["watched"]
                 ud["watched"] = {"movie": old_watched, "tv": {}}
+            # Migrate tv_season_counts
+            if "tv_season_counts" not in ud:
+                ud["tv_season_counts"] = {}
     save_user_data()
 
 
@@ -169,7 +175,9 @@ _search_results = {}  # user_id -> (chat_id, [message_ids])
 _search_more = {}  # user_id -> (remaining_sorted_results, query)
 _rate_list_messages = {}  # user_id -> (chat_id, [message_ids])
 _rec_genre_filter = {}  # user_id -> {"watchlist": str, "genres": set}
-_last_watched = {}  # user_id -> {"mid": int, "watchlist": str|None, "prev_rating": int|None|"absent"}
+# user_id -> {"mid": int, "watchlist": str|None, "prev_rating": int|None|"absent"}
+_last_watched = {}
+_pending_season = {}  # user_id -> {"mid": int, "total": int, "media_type": str}
 
 _MODE_SWITCH_TV = "\U0001f4fa Switch to TV"
 _MODE_SWITCH_MOVIE = "\U0001f3ac Switch to Movies"
@@ -180,9 +188,11 @@ def get_main_keyboard(user):
     toggle_label = _MODE_SWITCH_TV if mode == "movie" else _MODE_SWITCH_MOVIE
     return ReplyKeyboardMarkup(
         [
-            [KeyboardButton("/search"), KeyboardButton("/list"), KeyboardButton("/check")],
+            [KeyboardButton("/search"), KeyboardButton("/list"),
+             KeyboardButton("/check")],
             [KeyboardButton("/recommend"), KeyboardButton("/popular")],
-            [KeyboardButton("/pick"), KeyboardButton("/clear"), KeyboardButton(toggle_label)],
+            [KeyboardButton("/pick"), KeyboardButton("/clear"),
+             KeyboardButton(toggle_label)],
         ],
         resize_keyboard=True,
         is_persistent=True,
@@ -309,7 +319,8 @@ def _esc_plain(s):
 def extract_movie_info(m, skip_trailer=False, mode="movie"):
     title = m.get("title") or m.get("name") or "Unknown"
     poster_path = get_image_url(m.get('poster_path'))
-    rating = m["vote_average"] if "vote_average" in m and m.get("vote_count", 0) > 0 else None
+    rating = m["vote_average"] if "vote_average" in m and m.get(
+        "vote_count", 0) > 0 else None
     if mode == "movie":
         date_str = m.get("release_date") or None
     else:
@@ -349,10 +360,12 @@ def is_in_any_watchlist(media_id, user, mode=None):
             return wn
     return None
 
+
 def find_all_watchlists(media_id, user, mode=None):
     if mode is None:
         mode = user_data[user].get("mode", "movie")
     return [wn for wn, w in user_data[user]["watchlists"][mode].items() if media_id in w]
+
 
 def is_valid_media_id(media_id, mode="movie"):
     if not media_id.isdigit():
@@ -362,6 +375,7 @@ def is_valid_media_id(media_id, mode="movie"):
     except Exception:
         return "Movie not found" if mode == "movie" else "TV show not found"
     return None
+
 
 def split_into_chunks(text, max_chunk_size=4096):
     # Initialize variables
@@ -377,7 +391,8 @@ def split_into_chunks(text, max_chunk_size=4096):
             break
 
         # Find the last newline character within the max_chunk_size
-        last_newline = text.rfind('\n', current_position, current_position + max_chunk_size)
+        last_newline = text.rfind(
+            '\n', current_position, current_position + max_chunk_size)
 
         if last_newline == -1:
             # If no newline found, force split at max_chunk_size (if necessary, but not ideal)
@@ -389,6 +404,7 @@ def split_into_chunks(text, max_chunk_size=4096):
         current_position = last_newline + 1
 
     return chunks
+
 
 def _is_search_message(user, message_id):
     if user not in _search_results:
@@ -467,12 +483,16 @@ def build_media_keyboard(media_id: int, user: int, mode=None) -> InlineKeyboardM
     buttons = []
     watchlist_name = is_in_any_watchlist(media_id, user, mode=mode)
     if watchlist_name:
-        buttons.append(InlineKeyboardButton("Remove", callback_data=f"rm:{mt}:{media_id}"))
+        buttons.append(InlineKeyboardButton(
+            "Remove", callback_data=f"rm:{mt}:{media_id}"))
     else:
-        buttons.append(InlineKeyboardButton("Add", callback_data=f"pick:{mt}:{media_id}"))
-    already_watched = media_id in user_data[user].get("watched", {}).get(mode, {})
+        buttons.append(InlineKeyboardButton(
+            "Add", callback_data=f"pick:{mt}:{media_id}"))
+    already_watched = media_id in user_data[user].get(
+        "watched", {}).get(mode, {})
     if not already_watched:
-        buttons.append(InlineKeyboardButton("Watched", callback_data=f"w:{mt}:{media_id}"))
+        buttons.append(InlineKeyboardButton(
+            "Watched", callback_data=f"w:{mt}:{media_id}"))
     return InlineKeyboardMarkup([buttons])
 
 
@@ -537,8 +557,25 @@ def build_rating_keyboard(media_id: int, media_type: str, action_prefix: str = "
             for i in range(1, 6)]
     row2 = [InlineKeyboardButton(str(i), callback_data=f"{action_prefix}:{media_type}:{media_id}:{i}")
             for i in range(6, 11)]
-    row3 = [InlineKeyboardButton("Skip", callback_data=f"{action_prefix}:{media_type}:{media_id}:0")]
+    row3 = [InlineKeyboardButton(
+        "Skip", callback_data=f"{action_prefix}:{media_type}:{media_id}:0")]
     return InlineKeyboardMarkup([row1, row2, row3])
+
+
+def build_season_picker_keyboard(media_id: int, media_type: str, num_seasons: int, action_prefix: str = "ws") -> InlineKeyboardMarkup:
+    rows = []
+    row = []
+    for i in range(1, num_seasons + 1):
+        row.append(InlineKeyboardButton(
+            f"S{i}", callback_data=f"{action_prefix}:{media_type}:{media_id}:{i}"))
+        if len(row) == 5:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append([InlineKeyboardButton(
+        "All seasons", callback_data=f"{action_prefix}:{media_type}:{media_id}:{num_seasons}")])
+    return InlineKeyboardMarkup(rows)
 
 
 def build_region_keyboard(page: int = 0) -> InlineKeyboardMarkup:
@@ -553,9 +590,11 @@ def build_region_keyboard(page: int = 0) -> InlineKeyboardMarkup:
         rows.append(row)
     nav = []
     if page > 0:
-        nav.append(InlineKeyboardButton("\u25c0 Back", callback_data=f"regp:{page - 1}"))
+        nav.append(InlineKeyboardButton(
+            "\u25c0 Back", callback_data=f"regp:{page - 1}"))
     if end < len(REGIONS):
-        nav.append(InlineKeyboardButton("Next \u25b6", callback_data=f"regp:{page + 1}"))
+        nav.append(InlineKeyboardButton(
+            "Next \u25b6", callback_data=f"regp:{page + 1}"))
     if nav:
         rows.append(nav)
     return InlineKeyboardMarkup(rows)
@@ -611,6 +650,7 @@ async def send_movie_message(update: Update, caption: str, poster_path, media_id
 
 _CHUNK_MOVIES_MAX = 200
 
+
 async def send_movie_list(bot, chat_id, header: str, movies_info, detail_action: str = "det", media_type: str = "m"):
     """Send a chunked itemized list with expand/collapse buttons.
 
@@ -621,7 +661,8 @@ async def send_movie_list(bot, chat_id, header: str, movies_info, detail_action:
     """
     global _chunk_id_counter
     if len(_chunk_movies) > _CHUNK_MOVIES_MAX:
-        oldest_keys = sorted(_chunk_movies.keys())[:len(_chunk_movies) - _CHUNK_MOVIES_MAX]
+        oldest_keys = sorted(_chunk_movies.keys())[
+            :len(_chunk_movies) - _CHUNK_MOVIES_MAX]
         for k in oldest_keys:
             del _chunk_movies[k]
     chunk_text = header + "\n"
@@ -634,7 +675,8 @@ async def send_movie_list(bot, chat_id, header: str, movies_info, detail_action:
             cid = _chunk_id_counter
             _chunk_id_counter += 1
             _chunk_movies[cid] = (chunk_movies_list, detail_action, media_type)
-            kb = build_chunk_keyboard(cid, chunk_movies_list, expanded=False, media_type=media_type)
+            kb = build_chunk_keyboard(
+                cid, chunk_movies_list, expanded=False, media_type=media_type)
             sent.append(await bot.send_message(
                 chat_id=chat_id,
                 text=esc(chunk_text),
@@ -654,7 +696,8 @@ async def send_movie_list(bot, chat_id, header: str, movies_info, detail_action:
             cid = _chunk_id_counter
             _chunk_id_counter += 1
             _chunk_movies[cid] = (chunk_movies_list, detail_action, media_type)
-            kb = build_chunk_keyboard(cid, chunk_movies_list, expanded=False, media_type=media_type)
+            kb = build_chunk_keyboard(
+                cid, chunk_movies_list, expanded=False, media_type=media_type)
         sent.append(await bot.send_message(
             chat_id=chat_id,
             text=esc(chunk_text),
@@ -683,7 +726,6 @@ async def list_watchlists(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     )
 
 
-
 async def show_my_providers(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = get_user_id(update)
     if check_user_invalid(user):
@@ -695,7 +737,6 @@ async def show_my_providers(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         "Your streaming services:",
         reply_markup=keyboard
     )
-
 
 
 async def add_to_watchlist_helper(watchlist, media_id, user, update: Update):
@@ -770,13 +811,26 @@ async def add_to_watched(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await send_back_text(update, f'The provided ID is invalid: ' + err_msg)
         return
     media_id = int(media_id)
-    if media_id in user_data[user]["watched"][mode]:
-        await send_back_text(update, 'Already marked as watched.')
-        return
-    keyboard = build_rating_keyboard(media_id, mt)
-    await update.message.reply_text(
-        "Rate this (1\u201310):",
-        reply_markup=keyboard)
+    if mode == "tv":
+        try:
+            details = tv.details(media_id)
+            num_seasons = details.get("number_of_seasons") or 1
+        except Exception:
+            num_seasons = 1
+        _pending_season[user] = {"mid": media_id,
+                                 "total": num_seasons, "media_type": mt}
+        keyboard = build_season_picker_keyboard(media_id, mt, num_seasons)
+        await update.message.reply_text(
+            "Which season did you watch up to?",
+            reply_markup=keyboard)
+    else:
+        if media_id in user_data[user]["watched"][mode]:
+            await send_back_text(update, 'Already marked as watched.')
+            return
+        keyboard = build_rating_keyboard(media_id, mt)
+        await update.message.reply_text(
+            "Rate this (1\u201310):",
+            reply_markup=keyboard)
 
 
 async def remove_from_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -813,7 +867,8 @@ async def _do_recommend(bot, chat_id, user, watchlist, genre_filter=None):
     mode = user_data[user].get("mode", "movie")
     mt = _mode_to_type(mode)
     api = get_api(mode)
-    sources = [(mid, 1.0) for mid in user_data[user]["watchlists"][mode][watchlist]]
+    sources = [(mid, 1.0)
+               for mid in user_data[user]["watchlists"][mode][watchlist]]
     rated_watched = sorted(
         [(mid, r) for mid, r in user_data[user]["watched"][mode].items()
          if r is not None and r >= 7],
@@ -895,7 +950,8 @@ async def _do_recommend(bot, chat_id, user, watchlist, genre_filter=None):
     else:
         await bot.send_message(
             chat_id,
-            esc(f'No recommendations found based on your "{watchlist}" watchlist.'),
+            esc(
+                f'No recommendations found based on your "{watchlist}" watchlist.'),
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=get_main_keyboard(user))
 
@@ -976,7 +1032,8 @@ async def check_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             for media_id, prov, details in items:
                 _, _, desc, mid = extract_movie_info(
                     details, skip_trailer=True, mode=mode)
-                title = details.get("title") or details.get("name") or "Unknown"
+                title = details.get("title") or details.get(
+                    "name") or "Unknown"
                 provider_str = create_available_at_str(prov)
                 movies_info.append((mid, title, desc + "\n" + provider_str))
             await send_movie_list(
@@ -1025,7 +1082,8 @@ async def popular_movies(update: Update, context: CallbackContext) -> None:
         available, prov = is_available_for_free(
             my_providers, m["id"], user_region, mode=mode)
         if available:
-            _, poster, desc, mid = extract_movie_info(m, skip_trailer=True, mode=mode)
+            _, poster, desc, mid = extract_movie_info(
+                m, skip_trailer=True, mode=mode)
             title = m.get("title") or m.get("name") or "Unknown"
             return (mid, title, desc, prov)
         return None
@@ -1114,6 +1172,156 @@ async def _with_progress_bar(bot, chat_id, label, total, work_fn):
     except Exception:
         pass
     return result
+
+
+def _check_new_seasons_for_user(user, tick=None):
+    """Check watched TV shows for new seasons. Returns (new_list, newly_recorded).
+    new_list: [(media_id, title, old_total, new_total, watched_season, details), ...]
+    newly_recorded: count of shows that had no prior season data (baseline recorded)."""
+    watched_tv = user_data[user].get("watched", {}).get("tv", {})
+    stored = user_data[user].get("tv_season_counts", {})
+    new_list = []
+    newly_recorded = 0
+    num_threads = min(multiprocessing.cpu_count(), 8)
+
+    def fetch_show(mid):
+        try:
+            details = tv.details(mid)
+            if tick:
+                tick()
+            return (mid, details)
+        except Exception:
+            if tick:
+                tick()
+            return (mid, None)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=num_threads) as executor:
+        for mid, details in executor.map(fetch_show, list(watched_tv.keys())):
+            if details is None:
+                continue
+            title = details.get("name") or details.get("title") or "Unknown"
+            current_total = details.get("number_of_seasons") or 0
+            if mid in stored:
+                old_total = stored[mid].get("total", 0)
+                watched_season = stored[mid].get("watched", old_total)
+                if current_total > old_total:
+                    new_list.append(
+                        (mid, title, old_total, current_total, watched_season, details))
+                stored[mid]["total"] = current_total
+            else:
+                stored[mid] = {"total": current_total,
+                               "watched": current_total}
+                newly_recorded += 1
+    user_data[user]["tv_season_counts"] = stored
+    return new_list, newly_recorded
+
+
+async def new_seasons(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = get_user_id(update)
+    if check_user_invalid(user):
+        await unauthorized_msg(update)
+        return
+
+    watched_tv = user_data[user].get("watched", {}).get("tv", {})
+    if not watched_tv:
+        await send_back_text(update, "You have no watched TV shows.")
+        return
+
+    bot = update.get_bot()
+    chat_id = update.message.chat_id
+    total = len(watched_tv)
+
+    def do_check(tick):
+        return _check_new_seasons_for_user(user, tick)
+
+    new_list, newly_recorded = await _with_progress_bar(
+        bot, chat_id, "Checking for new seasons\u2026", total, do_check)
+    save_user_data()
+
+    parts = []
+    if new_list:
+        movies_info = []
+        for mid, title, old_total, new_total, watched_season, details in new_list:
+            _, _, desc, _ = extract_movie_info(
+                details, skip_trailer=True, mode="tv")
+            diff = new_total - old_total
+            season_word = "season" if diff == 1 else "seasons"
+            extra = f"\u2728 {diff} new {season_word} (you watched S{watched_season}, now has {new_total} seasons)"
+            movies_info.append((mid, title, desc + "\n" + extra))
+        await send_movie_list(bot, chat_id,
+                              f"New seasons available for {len(new_list)} show(s):",
+                              movies_info, media_type="tv")
+    else:
+        parts.append("No new seasons detected for your watched shows.")
+
+    if newly_recorded:
+        parts.append(f"Recorded season data for {newly_recorded} new show(s).")
+
+    if parts:
+        await send_back_text(update, " ".join(parts))
+
+
+async def _daily_season_check(context: ContextTypes.DEFAULT_TYPE):
+    """Daily job: check all users' watched TV shows for new seasons."""
+    for user in settings["allowed_users"]:
+        watched_tv = user_data[user].get("watched", {}).get("tv", {})
+        if not watched_tv:
+            continue
+        new_list, _ = await asyncio.to_thread(
+            _check_new_seasons_for_user, user)
+        if not new_list:
+            continue
+        save_user_data()
+        movies_info = []
+        for mid, title, old_total, new_total, watched_season, details in new_list:
+            _, _, desc, _ = extract_movie_info(
+                details, skip_trailer=True, mode="tv")
+            diff = new_total - old_total
+            season_word = "season" if diff == 1 else "seasons"
+            extra = f"\u2728 {diff} new {season_word} (you watched S{watched_season}, now has {new_total} seasons)"
+            movies_info.append((mid, title, desc + "\n" + extra))
+        await send_movie_list(context.bot, user,
+                              f"New seasons available for {len(new_list)} show(s):",
+                              movies_info, media_type="tv")
+
+
+async def view_seasons(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = get_user_id(update)
+    if check_user_invalid(user):
+        await unauthorized_msg(update)
+        return
+
+    watched_tv = user_data[user].get("watched", {}).get("tv", {})
+    if not watched_tv:
+        await send_back_text(update, "You have no watched TV shows.")
+        return
+
+    stored = user_data[user].get("tv_season_counts", {})
+    movies_info = []
+    for mid, rating in watched_tv.items():
+        try:
+            details = tv.details(mid)
+        except Exception:
+            continue
+        title = details.get("name") or details.get("title") or "Unknown"
+        _, _, desc, _ = extract_movie_info(
+            details, skip_trailer=True, mode="tv")
+        season_data = stored.get(mid)
+        if season_data:
+            watched_s = season_data.get("watched", "?")
+            total_s = season_data.get("total", "?")
+            season_str = f"Watched: S{watched_s}/{total_s}"
+        else:
+            total_s = details.get("number_of_seasons") or "?"
+            season_str = f"Watched: ?/{total_s}"
+        rating_str = f"{rating}/10" if rating else "unrated"
+        movies_info.append(
+            (mid, title, f"{desc}\n{season_str} - {rating_str}"))
+
+    await send_movie_list(
+        update.get_bot(), update.message.chat_id,
+        f"Season tracking for {len(movies_info)} TV show(s):",
+        movies_info, detail_action="sdet", media_type="tv")
 
 
 def _collect_pick_candidates(user, watchlist=None):
@@ -1295,7 +1503,8 @@ async def _send_rate_list(bot, chat_id, user):
     movies_info = []
     for mid, r in unrated + rated:
         details = api.details(mid)
-        _, _, desc, _ = extract_movie_info(details, skip_trailer=True, mode=mode)
+        _, _, desc, _ = extract_movie_info(
+            details, skip_trailer=True, mode=mode)
         title = details.get("title") or details.get("name") or "Unknown"
         rating_str = "unrated" if r is None else f"Your rating: {r}/10"
         movies_info.append((mid, title, f"{desc}\n{rating_str}"))
@@ -1327,7 +1536,8 @@ async def rate_movies(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     msgs = await _send_rate_list(
         update.get_bot(), update.message.chat_id, user)
-    _rate_list_messages[user] = (update.message.chat_id, [m.message_id for m in msgs])
+    _rate_list_messages[user] = (update.message.chat_id, [
+                                 m.message_id for m in msgs])
 
 
 async def do_search(update: Update, query: str, user: int) -> None:
@@ -1425,7 +1635,8 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         else:
             confirm_text = f'Delete "{wl_name}"?'
         confirm_kb = InlineKeyboardMarkup([[
-            InlineKeyboardButton("Yes, delete", callback_data=f"dwly:{wl_name}"),
+            InlineKeyboardButton(
+                "Yes, delete", callback_data=f"dwly:{wl_name}"),
             InlineKeyboardButton("Cancel", callback_data="dwln")
         ]])
         await query.edit_message_text(
@@ -1588,6 +1799,13 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         for wn in prev_wls:
             if wn in user_data[user]["watchlists"][undo_mode]:
                 user_data[user]["watchlists"][undo_mode][wn].append(mid)
+        # Restore tv_season_counts
+        prev_season_data = state.get("prev_season_data")
+        if undo_mode == "tv" and prev_season_data is not None:
+            if prev_season_data == "absent":
+                user_data[user]["tv_season_counts"].pop(mid, None)
+            else:
+                user_data[user]["tv_season_counts"][mid] = prev_season_data
         save_user_data()
         await query.answer("Undone!")
         try:
@@ -1620,10 +1838,20 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         # Save undo state
         prev_wls = find_all_watchlists(mid, user, mode=rate_mode)
         prev_rating = user_data[user]["watched"][rate_mode].get(mid, "absent")
-        _last_watched[user] = {"mid": mid, "watchlists": prev_wls, "prev_rating": prev_rating, "mode": rate_mode}
+        prev_season_data = user_data[user]["tv_season_counts"].get(
+            mid, "absent") if rate_mode == "tv" else None
+        _last_watched[user] = {"mid": mid, "watchlists": prev_wls,
+                               "prev_rating": prev_rating, "prev_season_data": prev_season_data, "mode": rate_mode}
         for wn in prev_wls:
             user_data[user]["watchlists"][rate_mode][wn].remove(mid)
         user_data[user]["watched"][rate_mode][mid] = rating
+        # Save season tracking data for TV shows
+        if rate_mode == "tv" and user in _pending_season and _pending_season[user]["mid"] == mid:
+            pending = _pending_season.pop(user)
+            user_data[user]["tv_season_counts"][mid] = {
+                "total": pending["total"],
+                "watched": pending.get("season", pending["total"]),
+            }
         save_user_data()
         if rating:
             await query.answer(f"Rated {rating}/10 and marked as watched.")
@@ -1685,7 +1913,8 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             return
         expanded = action == "exp"
         chunk_movies_list, det_action, chunk_mt = _chunk_movies[cid]
-        kb = build_chunk_keyboard(cid, chunk_movies_list, expanded=expanded, detail_action=det_action, media_type=chunk_mt)
+        kb = build_chunk_keyboard(
+            cid, chunk_movies_list, expanded=expanded, detail_action=det_action, media_type=chunk_mt)
         await query.edit_message_reply_markup(reply_markup=kb)
         await query.answer()
         return
@@ -1702,7 +1931,8 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         details = api.details(mid)
         _, poster_path, desc, _ = extract_movie_info(details, mode=det_mode)
         if action == "rdet":
-            keyboard = build_rating_keyboard(mid, media_type=det_mt, action_prefix="rrate")
+            keyboard = build_rating_keyboard(
+                mid, media_type=det_mt, action_prefix="rrate")
         else:
             keyboard = build_media_keyboard(mid, user, mode=det_mode)
         await query.answer()
@@ -1721,6 +1951,59 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
                 parse_mode=ParseMode.MARKDOWN_V2,
                 reply_markup=keyboard
             )
+        return
+
+    if action == "sdet":
+        parts = raw.split(":", 2)
+        if len(parts) < 3:
+            await query.answer("Invalid action.", show_alert=True)
+            return
+        mid = int(parts[2])
+        try:
+            details = tv.details(mid)
+            num_seasons = details.get("number_of_seasons") or 1
+        except Exception:
+            num_seasons = 1
+        _pending_season[user] = {"mid": mid,
+                                 "total": num_seasons, "media_type": "tv"}
+        season_kb = build_season_picker_keyboard(
+            mid, "tv", num_seasons, action_prefix="supd")
+        await query.answer("Update watched season:")
+        bot = query.get_bot()
+        chat_id = query.message.chat_id
+        stored = user_data[user].get("tv_season_counts", {}).get(mid)
+        current_s = stored.get("watched", "?") if stored else "?"
+        await bot.send_message(
+            chat_id,
+            esc(
+                f"Update watched season for this show (currently S{current_s}/{num_seasons}):"),
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=season_kb)
+        return
+
+    if action == "supd":
+        parts = raw.split(":")
+        try:
+            mid = int(parts[2])
+            season_num = int(parts[3])
+        except (ValueError, IndexError):
+            await query.answer("Invalid action.", show_alert=True)
+            return
+        stored = user_data[user].get("tv_season_counts", {})
+        if mid in stored:
+            stored[mid]["watched"] = season_num
+        else:
+            total = season_num
+            if user in _pending_season and _pending_season[user]["mid"] == mid:
+                total = _pending_season[user]["total"]
+            stored[mid] = {"total": total, "watched": season_num}
+        _pending_season.pop(user, None)
+        save_user_data()
+        await query.answer(f"Updated to season {season_num}.")
+        try:
+            await query.message.delete()
+        except Exception:
+            await query.edit_message_reply_markup(reply_markup=None)
         return
 
     if action == "rpick":
@@ -1763,7 +2046,8 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     cb_mode = _type_to_mode(media_type)
 
     if action == "pick":
-        picker_keyboard = build_watchlist_picker_keyboard(movie_id, user, mode=cb_mode)
+        picker_keyboard = build_watchlist_picker_keyboard(
+            movie_id, user, mode=cb_mode)
         await query.edit_message_reply_markup(reply_markup=picker_keyboard)
         await query.answer()
 
@@ -1798,7 +2082,8 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
                     f'Added to "{watchlist}".',
                     reply_markup=get_main_keyboard(user))
             else:
-                new_keyboard = build_media_keyboard(movie_id, user, mode=cb_mode)
+                new_keyboard = build_media_keyboard(
+                    movie_id, user, mode=cb_mode)
                 await query.edit_message_reply_markup(reply_markup=new_keyboard)
 
     elif action == "rm":
@@ -1817,18 +2102,49 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
                     "Removed from watchlist.",
                     reply_markup=get_main_keyboard(user))
             else:
-                new_keyboard = build_media_keyboard(movie_id, user, mode=cb_mode)
+                new_keyboard = build_media_keyboard(
+                    movie_id, user, mode=cb_mode)
                 await query.edit_message_reply_markup(reply_markup=new_keyboard)
         else:
             await query.answer("Not in any watchlist.", show_alert=True)
 
     elif action == "w":
-        if movie_id in user_data[user]["watched"][cb_mode] and user_data[user]["watched"][cb_mode][movie_id] is not None:
-            await query.answer("Already marked as watched.", show_alert=True)
+        if media_type == "tv":
+            try:
+                details = tv.details(movie_id)
+                num_seasons = details.get("number_of_seasons") or 1
+            except Exception:
+                num_seasons = 1
+            _pending_season[user] = {
+                "mid": movie_id, "total": num_seasons, "media_type": media_type}
+            season_kb = build_season_picker_keyboard(
+                movie_id, media_type, num_seasons)
+            await query.edit_message_reply_markup(reply_markup=season_kb)
+            await query.answer("Which season did you watch up to?")
         else:
-            rating_kb = build_rating_keyboard(movie_id, media_type=media_type)
-            await query.edit_message_reply_markup(reply_markup=rating_kb)
-            await query.answer("Rate this:")
+            if movie_id in user_data[user]["watched"][cb_mode] and user_data[user]["watched"][cb_mode][movie_id] is not None:
+                await query.answer("Already marked as watched.", show_alert=True)
+            else:
+                rating_kb = build_rating_keyboard(
+                    movie_id, media_type=media_type)
+                await query.edit_message_reply_markup(reply_markup=rating_kb)
+                await query.answer("Rate this:")
+
+    elif action == "ws":
+        parts = raw.split(":")
+        try:
+            season_num = int(parts[3])
+        except (ValueError, IndexError):
+            await query.answer("Invalid action.", show_alert=True)
+            return
+        if user in _pending_season:
+            _pending_season[user]["season"] = season_num
+        else:
+            _pending_season[user] = {
+                "mid": movie_id, "total": season_num, "season": season_num, "media_type": media_type}
+        rating_kb = build_rating_keyboard(movie_id, media_type=media_type)
+        await query.edit_message_reply_markup(reply_markup=rating_kb)
+        await query.answer("Rate this:")
 
     else:
         await query.answer("Unknown action.", show_alert=True)
@@ -1915,7 +2231,17 @@ async def post_init(application):
         BotCommand("popular", "Show popular titles on your streaming services"),
         BotCommand("pick", "Pick a random title from your watchlists"),
         BotCommand("mode", "Switch between Movies and TV mode"),
+        BotCommand("newseasons", "Check for new seasons of watched TV shows"),
+        BotCommand("seasons", "View/edit watched seasons for TV shows"),
     ])
+    if application.job_queue:
+        application.job_queue.run_daily(
+            _daily_season_check,
+            time=datetime.time(hour=9, minute=0),
+        )
+    else:
+        logger.warning("JobQueue not available. Daily season check disabled. "
+                       "Install python-telegram-bot[job-queue] to enable.")
 
 
 def main():
@@ -1926,9 +2252,11 @@ def main():
     application.add_handler(CommandHandler(['search', 's'], search_handler))
     application.add_handler(CommandHandler(['list', 'l'], list_watchlists))
     application.add_handler(CommandHandler(['add', 'a'], add_to_watchlist))
-    application.add_handler(CommandHandler(['tadd', 't'], add_to_trash_watchlist))
+    application.add_handler(CommandHandler(
+        ['tadd', 't'], add_to_trash_watchlist))
     application.add_handler(CommandHandler(['watched', 'w'], add_to_watched))
-    application.add_handler(CommandHandler(['remove', 'rm'], remove_from_watchlist))
+    application.add_handler(CommandHandler(
+        ['remove', 'rm'], remove_from_watchlist))
     application.add_handler(CommandHandler('rate', rate_movies))
     application.add_handler(CommandHandler('services', show_my_providers))
     application.add_handler(CommandHandler(['check', 'c'], check_watchlist))
@@ -1936,6 +2264,8 @@ def main():
     application.add_handler(CommandHandler(['popular', 'pop'], popular_movies))
     application.add_handler(CommandHandler(['pick', 'p'], pick_movie))
     application.add_handler(CommandHandler(['mode', 'm'], toggle_mode))
+    application.add_handler(CommandHandler(['newseasons', 'ns'], new_seasons))
+    application.add_handler(CommandHandler(['seasons', 'ss'], view_seasons))
     application.add_handler(CommandHandler('clear', clear_chat))
     application.add_handler(CommandHandler('fix', fix_keyboard))
     application.add_handler(CallbackQueryHandler(button_callback_handler))
@@ -1944,7 +2274,8 @@ def main():
         reply_handler
     ))
     application.add_handler(MessageHandler(
-        filters.Regex(f"^({re.escape(_MODE_SWITCH_TV)}|{re.escape(_MODE_SWITCH_MOVIE)})$"),
+        filters.Regex(
+            f"^({re.escape(_MODE_SWITCH_TV)}|{re.escape(_MODE_SWITCH_MOVIE)})$"),
         toggle_mode
     ))
     application.add_handler(MessageHandler(

@@ -14,6 +14,7 @@
 
       myPyPackages = python-packages: with python-packages; [
         python-telegram-bot
+        apscheduler
         pyyaml
         (buildPythonPackage rec {
           pname = "tmdbv3api";

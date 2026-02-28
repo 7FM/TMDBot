@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-TMDBot is a Telegram bot for discovering and managing movies and TV shows using The Movie Database (TMDb) API. It provides search, watchlist management, streaming provider integration, rating, recommendation features, random picker, and user onboarding — with a per-user mode switch between Movies and TV. The entire bot is implemented in a single file (`tmdbot.py`, ~1960 lines).
+TMDBot is a Telegram bot for discovering and managing movies and TV shows using The Movie Database (TMDb) API. It provides search, watchlist management, streaming provider integration, rating, recommendation features, random picker, new season detection, and user onboarding — with a per-user mode switch between Movies and TV. The entire bot is implemented in a single file (`tmdbot.py`, ~2100 lines).
 
 ## Build & Run
 
@@ -22,14 +22,14 @@ There are no tests in this project.
 
 Two YAML files (git-ignored) are required at runtime:
 - `settings.yaml` — Telegram bot token, TMDb API key, allowed user IDs
-- `user_data.yaml` — Per-user state (mode, watchlists nested by mode, providers, watched history with ratings nested by mode, region, onboarded flag); auto-created if missing
+- `user_data.yaml` — Per-user state (mode, watchlists nested by mode, providers, watched history with ratings nested by mode, region, onboarded flag, `tv_season_counts` for season tracking); auto-created if missing
 
 ## Architecture
 
 **Single-file design:** All logic lives in `tmdbot.py`. Key layers:
 
 1. **Global initialization** (lines 1-155): Loads settings, initializes TMDb API clients (`Movie`, `TV`, `Search`, `Genre`, `Provider`), dual genre caches (`movie_genre_dict`, `tv_genre_dict`), logger, `REGIONS` list, and mode helpers (`get_api()`, `get_genre_dict()`, `_mode_to_type()`, `_type_to_mode()`) at module level
-2. **Global state** (lines 157-175): In-memory caches and UI constants — `_provider_cache` (with TTL), `_pending_new_watchlist` (stores `(movie_id, mode)` tuple), `_pending_search`, `_chunk_movies`/`_chunk_id_counter` (expand/collapse state, 3-tuple with media_type), `_search_results` (search message tracking), `_search_more` (search pagination state), `_rate_list_messages` (rate list tracking), `_rec_genre_filter` (recommendation genre filter state), `_last_watched` (undo state with mode), `get_main_keyboard(user)` (dynamic persistent reply keyboard with mode toggle button)
+2. **Global state** (lines 157-178): In-memory caches and UI constants — `_provider_cache` (with TTL), `_pending_new_watchlist` (stores `(movie_id, mode)` tuple), `_pending_search`, `_chunk_movies`/`_chunk_id_counter` (expand/collapse state, 3-tuple with media_type), `_search_results` (search message tracking), `_search_more` (search pagination state), `_rate_list_messages` (rate list tracking), `_rec_genre_filter` (recommendation genre filter state), `_last_watched` (undo state with mode and season data), `_pending_season` (season picker state for TV watched flow), `get_main_keyboard(user)` (dynamic persistent reply keyboard with mode toggle button)
 3. **Helper functions** (lines 147-540): Movie info extraction, MarkdownV2 escaping, message chunking, provider lookups (all using `append_to_response` via `_parse_providers_from_details`), keyboard builders (including `build_genre_picker_keyboard`), `send_movie_message()`, `send_movie_list()`
 4. **Command handlers** (lines 543-1040): Async handlers registered via `python-telegram-bot`'s `CommandHandler`
 5. **Callback handler** (`button_callback_handler()`, line 1194): Central dispatcher for all inline keyboard button presses
@@ -43,7 +43,7 @@ Two YAML files (git-ignored) are required at runtime:
 - All command handlers are `async def` functions taking `(Update, ContextTypes.DEFAULT_TYPE)`
 - Every handler starts with user authorization check via `check_user_invalid()`
 - User state is a global `user_data` dict persisted to YAML via `save_user_data()`
-- `user_data_initialize()` handles data migrations (e.g., `watched` list → dict for ratings, `onboarded` flag, flat watchlists/watched → nested by mode `{"movie": ..., "tv": ...}`)
+- `user_data_initialize()` handles data migrations (e.g., `watched` list → dict for ratings, `onboarded` flag, flat watchlists/watched → nested by mode `{"movie": ..., "tv": ...}`, `tv_season_counts` dict)
 - Text output uses `send_back_text()` which escapes for MarkdownV2, splits long messages, and always restores the persistent keyboard
 - Movie search results use `send_movie_message()` which attaches inline keyboard buttons (Add/Remove/Watched); search result message IDs are tracked in `_search_results` for cleanup after user action
 - List-based views (watchlist browsing, recommend, check, popular, rate) use `send_movie_list(bot, chat_id, ...)` which produces chunked itemized lists with expand/collapse buttons, link preview disabled, and returns sent `Message` objects for tracking
@@ -55,12 +55,15 @@ Two YAML files (git-ignored) are required at runtime:
 - `/pick` picks a random item from all watchlists (or a named one) that is available on the user's streaming services, with a "Pick another" inline button (`rpick` callback)
 - Detail messages (`det`/`rdet` callbacks) are sent as standalone messages (not replies) via `bot.send_photo`/`bot.send_message` so Telegram clients auto-scroll to them
 - `/search` without args uses `ForceReply` to prompt for input; new watchlist name entry (`nwl`/`new` callbacks) also uses `ForceReply`. Reply handler dispatches based on `_pending_search` and `_pending_new_watchlist` state. Plain text without reply defaults to search via `default_search_handler`
-- Marking an item as watched sends a confirmation with the main keyboard, then a separate "Undo?" message with an inline button. The `undo` callback restores the item to its previous watchlist and rating state via `_last_watched` (which stores the mode used)
+- Marking an item as watched sends a confirmation with the main keyboard, then a separate "Undo?" message with an inline button. The `undo` callback restores the item to its previous watchlist, rating, and season tracking state via `_last_watched` (which stores the mode used)
+- For TV shows, the watched flow adds a season picker step: `[Watched]` → season picker (`ws:` callback) → rating keyboard → save. Season data is stored in `tv_season_counts`. Re-marking an already-watched TV show shows the season picker again to update progress
+- `/newseasons` (`/ns`) checks all watched TV shows for new seasons by comparing TMDb's `number_of_seasons` against stored values in `tv_season_counts`. Uses `_with_progress_bar` for API calls. A daily `JobQueue` job (`_daily_season_check`) runs the same check for all users at 9:00 AM and only sends messages when new seasons are found
+- `/seasons` (`/ss`) lists all watched TV shows with their season tracking info (watched season / total seasons) and allows editing via `sdet`/`supd` callbacks
 
 **Inline keyboard & callback system:**
 
 All button presses route through `button_callback_handler()` using colon-delimited callback data (must fit in 64 bytes). Most actions use `action:type:id` format where type is `"m"` (movie) or `"tv"` (TV show). `parse_callback_data()` returns `(action, media_type, media_id, watchlist)`. Action prefixes:
-- `pick:type:id` — show watchlist picker; `a:type:id:watchlist` — add to watchlist; `rm:type:id` — remove; `w:type:id` — mark watched (shows rating keyboard with skip option)
+- `pick:type:id` — show watchlist picker; `a:type:id:watchlist` — add to watchlist; `rm:type:id` — remove; `w:type:id` — mark watched (for TV: shows season picker then rating; for movies: shows rating keyboard with skip option)
 - `back:type:id` — return from picker to Add/Watched buttons; `new:type:id` — create new watchlist (ForceReply) and add item
 - `rate:type:id:0-10` — submit rating (from search/watchlist context, 0=skip); `rrate:type:id:0-10` — submit rating (from `/rate` flow, triggers list refresh)
 - `wl:<name>` — browse watchlist contents (uses current mode); `det:type:id` — show full detail card; `rdet:type:id` — show item with rating keyboard (from `/rate` list)
@@ -71,7 +74,10 @@ All button presses route through `button_callback_handler()` using colon-delimit
 - `rpick:<watchlist|*>` — pick another random available item (`*` = all watchlists, uses current mode)
 - `smore` — show next 5 search results (uses current mode)
 - `gf:<genre_id>` — toggle genre in recommendation filter; `recgo:skip` / `recgo:filter` — launch recommendations (all genres or filtered)
-- `undo` — undo last "mark as watched" action (restores watchlist placement and previous rating, uses stored mode)
+- `ws:type:id:season` — season picked in TV watched flow (then shows rating keyboard)
+- `sdet:tv:id` — show season detail from `/seasons` list (shows season picker to update)
+- `supd:tv:id:season` — update watched season from `/seasons` view
+- `undo` — undo last "mark as watched" action (restores watchlist placement, previous rating, and season data, uses stored mode)
 
 **Onboarding:** New users (flagged with `onboarded: false`) get a region picker → streaming service selector flow on `/start`. Region picker is paginated with flag emojis. Onboarding completes automatically when the first service is selected.
 
@@ -87,4 +93,6 @@ All button presses route through `button_callback_handler()` using colon-delimit
 
 ## Bot Commands
 
-Commands are registered with short aliases (e.g., `/search`/`/s`, `/list`/`/l`, `/recommend`/`/r`, `/pick`/`/p`, `/mode`/`/m`). The full mapping is in `main()` at the handler registration block. The dynamic persistent reply keyboard provides quick access to `/search`, `/list`, `/check`, `/recommend`, `/popular`, `/pick`, `/clear`, and the mode toggle button. `/fix` restores the keyboard if lost. Plain text without a command triggers a search. `/search` without args uses ForceReply for immediate input.
+Commands are registered with short aliases (e.g., `/search`/`/s`, `/list`/`/l`, `/recommend`/`/r`, `/pick`/`/p`, `/mode`/`/m`, `/newseasons`/`/ns`, `/seasons`/`/ss`). The full mapping is in `main()` at the handler registration block. The dynamic persistent reply keyboard provides quick access to `/search`, `/list`, `/check`, `/recommend`, `/popular`, `/pick`, `/clear`, and the mode toggle button. `/fix` restores the keyboard if lost. Plain text without a command triggers a search. `/search` without args uses ForceReply for immediate input.
+
+**Season tracking:** `tv_season_counts` is a per-user dict mapping TV show media IDs to `{"total": int, "watched": int}`. `total` is the last-known number of seasons from TMDb; `watched` is the season the user watched up to. Populated automatically when marking a TV show as watched (season picker step) and checked by `/newseasons` and the daily job.
