@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-TMDBot is a Telegram bot for discovering and managing movies and TV shows using The Movie Database (TMDb) API. It provides search, watchlist management, streaming provider integration, rating, recommendation features, random picker, new season detection, and user onboarding — with a per-user mode switch between Movies and TV. The entire bot is implemented in a single file (`tmdbot.py`, ~2100 lines).
+TMDBot is a Telegram bot for discovering and managing movies and TV shows using The Movie Database (TMDb) API. It provides search, watchlist management, streaming provider integration, rating, recommendation features, random picker, new season detection, person search, trending titles, watch statistics, and user onboarding — with a per-user mode switch between Movies and TV. The entire bot is implemented in a single file (`tmdbot.py`, ~2500 lines).
 
 ## Build & Run
 
@@ -28,8 +28,8 @@ Two YAML files (git-ignored) are required at runtime:
 
 **Single-file design:** All logic lives in `tmdbot.py`. Key layers:
 
-1. **Global initialization** (lines 1-155): Loads settings, initializes TMDb API clients (`Movie`, `TV`, `Search`, `Genre`, `Provider`), dual genre caches (`movie_genre_dict`, `tv_genre_dict`), logger, `REGIONS` list, and mode helpers (`get_api()`, `get_genre_dict()`, `_mode_to_type()`, `_type_to_mode()`) at module level
-2. **Global state** (lines 157-178): In-memory caches and UI constants — `_provider_cache` (with TTL), `_pending_new_watchlist` (stores `(movie_id, mode)` tuple), `_pending_search`, `_chunk_movies`/`_chunk_id_counter` (expand/collapse state, 3-tuple with media_type), `_search_results` (search message tracking), `_search_more` (search pagination state), `_rate_list_messages` (rate list tracking), `_rec_genre_filter` (recommendation genre filter state), `_last_watched` (undo state with mode and season data), `_pending_season` (season picker state for TV watched flow), `get_main_keyboard(user)` (dynamic persistent reply keyboard with mode toggle button)
+1. **Global initialization** (lines 1-155): Loads settings, initializes TMDb API clients (`Movie`, `TV`, `Search`, `Genre`, `Provider`, `Trending`, `Person`), dual genre caches (`movie_genre_dict`, `tv_genre_dict`), logger, `REGIONS` list, and mode helpers (`get_api()`, `get_genre_dict()`, `_mode_to_type()`, `_type_to_mode()`) at module level
+2. **Global state** (lines 157-178): In-memory caches and UI constants — `_provider_cache` (with TTL), `_pending_new_watchlist` (stores `(movie_id, mode)` tuple), `_pending_search`, `_chunk_movies`/`_chunk_id_counter` (expand/collapse state, 3-tuple with media_type), `_search_results` (search message tracking), `_search_more` (search pagination state), `_rate_list_messages` (rate list tracking), `_rec_genre_filter` (recommendation genre filter state), `_last_watched` (undo state with mode and season data), `_pending_season` (season picker state for TV watched flow), `_pending_person` (person search ForceReply state), `get_main_keyboard(user)` (dynamic persistent reply keyboard with mode toggle button)
 3. **Helper functions** (lines 147-540): Movie info extraction, MarkdownV2 escaping, message chunking, provider lookups (all using `append_to_response` via `_parse_providers_from_details`), keyboard builders (including `build_genre_picker_keyboard`), `send_movie_message()`, `send_movie_list()`
 4. **Command handlers** (lines 543-1040): Async handlers registered via `python-telegram-bot`'s `CommandHandler`
 5. **Callback handler** (`button_callback_handler()`, line 1194): Central dispatcher for all inline keyboard button presses
@@ -85,7 +85,7 @@ All button presses route through `button_callback_handler()` using colon-delimit
 
 **Mode system:** Each user has a `"mode"` field (`"movie"` or `"tv"`). The dynamic keyboard (`get_main_keyboard(user)`) shows a toggle button. `/mode` command and the keyboard button both toggle the mode. All commands operate on the current mode's watchlists, watched history, genre dict, and API client. Callback data carries a type prefix (`"m"` or `"tv"`) so buttons remain valid regardless of the user's current mode. Data migration in `user_data_initialize()` wraps old flat structures into nested `{"movie": old_data, "tv": empty}`.
 
-**Multi-step interactions** use `ForceReply` prompts with pending state dicts (`_pending_new_watchlist` stores `(movie_id, mode)`, `_pending_search`), handled by `reply_handler()`. Plain text input (non-reply) defaults to search via `default_search_handler()`. `/fix` restores the persistent keyboard if ForceReply causes it to disappear.
+**Multi-step interactions** use `ForceReply` prompts with pending state dicts (`_pending_new_watchlist` stores `(movie_id, mode)`, `_pending_search`, `_pending_person`), handled by `reply_handler()`. Plain text input (non-reply) defaults to search via `default_search_handler()`. `/fix` restores the persistent keyboard if ForceReply causes it to disappear.
 
 **MarkdownV2 escaping:** `esc()` uses regex to preserve `[text](url)` links (escaping text inside brackets, escaping `\` and `)` in URLs) and `` `code` `` spans, while `_esc_plain()` escapes all reserved characters in plain text. tmdbv3api's `AsObj` wrapper raises `AttributeError` instead of `KeyError` for missing keys — catch both in try/except blocks.
 
@@ -93,6 +93,14 @@ All button presses route through `button_callback_handler()` using colon-delimit
 
 ## Bot Commands
 
-Commands are registered with short aliases (e.g., `/search`/`/s`, `/list`/`/l`, `/recommend`/`/r`, `/pick`/`/p`, `/mode`/`/m`, `/newseasons`/`/ns`, `/seasons`/`/ss`). The full mapping is in `main()` at the handler registration block. The dynamic persistent reply keyboard provides quick access to `/search`, `/list`, `/check`, `/recommend`, `/popular`, `/pick`, `/clear`, and the mode toggle button. `/fix` restores the keyboard if lost. Plain text without a command triggers a search. `/search` without args uses ForceReply for immediate input.
+Commands are registered with short aliases (e.g., `/search`/`/s`, `/list`/`/l`, `/recommend`/`/r`, `/pick`/`/p`, `/mode`/`/m`, `/newseasons`/`/ns`, `/seasons`/`/ss`, `/trending`/`/tr`, `/person`/`/ps`). The full mapping is in `main()` at the handler registration block. The dynamic persistent reply keyboard provides quick access to `/search`, `/list`, `/check`, `/recommend`, `/popular`, `/pick`, `/clear`, and the mode toggle button. `/fix` restores the keyboard if lost. Plain text without a command triggers a search. `/search` and `/person` without args use ForceReply for immediate input.
 
 **Season tracking:** `tv_season_counts` is a per-user dict mapping TV show media IDs to `{"total": int, "watched": int}`. `total` is the last-known number of seasons from TMDb; `watched` is the season the user watched up to. Populated automatically when marking a TV show as watched (season picker step) and checked by `/newseasons` and the daily job.
+
+**Stats:** `/stats` shows watch statistics for the current mode — total watched count, rated/unrated counts, average rating, rating distribution (bar chart), and top genres. Genre fetching uses `_with_progress_bar` since it requires per-item API calls.
+
+**Trending:** `/trending` (alias `/tr`) shows trending titles for the current mode using TMDb's `Trending` API (`trending.movie_day()` / `trending.tv_day()`). Displays 10 results via `send_movie_list()`, filters out already-watched items.
+
+**Person search:** `/person` (alias `/ps`) searches for an actor/director via `search.people()`, fetches their `combined_credits` via `person_api`, filters by current mode, sorts by rating, and displays top 20 results via `send_movie_list()`. Uses `_pending_person` state for ForceReply when called without args.
+
+**Duplicate warning:** When adding an already-watched item to a watchlist, the warning includes the user's previous rating (e.g., "rated 7/10") if one exists.

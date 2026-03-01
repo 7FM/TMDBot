@@ -13,7 +13,7 @@ from collections import Counter
 from telegram import Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton, LinkPreviewOptions, ForceReply
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, CallbackContext, ContextTypes
 from telegram.constants import ParseMode
-from tmdbv3api import TMDb, Movie, TV, Search, Genre, Provider
+from tmdbv3api import TMDb, Movie, TV, Search, Genre, Provider, Trending, Person
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +34,8 @@ tv = TV()
 search = Search()
 genre = Genre()
 provider = Provider()
+trending = Trending()
+person_api = Person()
 
 
 def get_api(mode):
@@ -178,6 +180,7 @@ _rec_genre_filter = {}  # user_id -> {"watchlist": str, "genres": set}
 # user_id -> {"mid": int, "watchlist": str|None, "prev_rating": int|None|"absent"}
 _last_watched = {}
 _pending_season = {}  # user_id -> {"mid": int, "total": int, "media_type": str}
+_pending_person = {}  # user_id -> True (ForceReply state for person search)
 
 _MODE_SWITCH_TV = "\U0001f4fa Switch to TV"
 _MODE_SWITCH_MOVIE = "\U0001f3ac Switch to Movies"
@@ -751,7 +754,11 @@ async def add_to_watchlist_helper(watchlist, media_id, user, update: Update):
         await send_back_text(update, f'Already in your "{already_in}" watchlist.')
     else:
         if media_id in user_data[user]["watched"][mode]:
-            await send_back_text(update, "Warning: you have already watched this!")
+            prev_rating = user_data[user]["watched"][mode][media_id]
+            if isinstance(prev_rating, (int, float)) and prev_rating > 0:
+                await send_back_text(update, f"Warning: you already watched this (rated {prev_rating}/10)!")
+            else:
+                await send_back_text(update, "Warning: you have already watched this!")
         user_data[user]["watchlists"][mode][watchlist].append(media_id)
         save_user_data()
         await send_back_text(update, 'Added to watchlist.')
@@ -1456,6 +1463,187 @@ async def fix_keyboard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await update.message.reply_text("Keyboard restored.", reply_markup=get_main_keyboard(user))
 
 
+async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = get_user_id(update)
+    if check_user_invalid(user):
+        await unauthorized_msg(update)
+        return
+
+    mode = user_data[user].get("mode", "movie")
+    watched = user_data[user]["watched"][mode]
+    total = len(watched)
+    if total == 0:
+        label = "movies" if mode == "movie" else "TV shows"
+        await send_back_text(update, f"You haven't watched any {label} yet.")
+        return
+
+    ratings = []
+    for mid, rating in watched.items():
+        if isinstance(rating, (int, float)) and rating > 0:
+            ratings.append(rating)
+    rated = len(ratings)
+    unrated = total - rated
+    avg = sum(ratings) / len(ratings) if ratings else 0
+
+    # Rating distribution
+    buckets = {"9-10": 0, "7-8": 0, "5-6": 0, "3-4": 0, "1-2": 0}
+    for r in ratings:
+        if r >= 9:
+            buckets["9-10"] += 1
+        elif r >= 7:
+            buckets["7-8"] += 1
+        elif r >= 5:
+            buckets["5-6"] += 1
+        elif r >= 3:
+            buckets["3-4"] += 1
+        else:
+            buckets["1-2"] += 1
+    max_count = max(buckets.values()) if buckets.values() else 1
+    bar_width = 15
+
+    label = "movie" if mode == "movie" else "TV show"
+    text = f"Your {label} stats:\n"
+    text += f"Total watched: {total}\n"
+    text += f"Rated: {rated} | Unrated: {unrated}\n"
+    if ratings:
+        text += f"Average rating: {avg:.1f}/10\n"
+
+    if ratings:
+        text += "\nRating distribution:\n"
+        for bucket, count in buckets.items():
+            bars = round(bar_width * count / max_count) if max_count > 0 else 0
+            text += f"{bucket}: {'█' * bars} {count}\n"
+
+    # Fetch genres with progress bar
+    api = get_api(mode)
+    mids = list(watched.keys())
+
+    def fetch_genres(tick):
+        genre_counter = Counter()
+        for mid in mids:
+            try:
+                details = api.details(mid)
+                genres = extract_genre(details, mode=mode)
+                for g in genres:
+                    genre_counter[g] += 1
+            except Exception:
+                pass
+            tick()
+        return genre_counter
+
+    genre_counter = await _with_progress_bar(
+        update.get_bot(), update.message.chat_id,
+        "Fetching stats...", len(mids), fetch_genres)
+
+    if genre_counter:
+        text += "\nTop genres:\n"
+        for i, (genre_name, count) in enumerate(genre_counter.most_common(10), 1):
+            text += f"{i}. {genre_name} ({count})\n"
+
+    await send_back_text(update, text)
+
+
+async def trending_titles(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = get_user_id(update)
+    if check_user_invalid(user):
+        await unauthorized_msg(update)
+        return
+
+    mode = user_data[user].get("mode", "movie")
+    mt = _mode_to_type(mode)
+    if mode == "movie":
+        results = trending.movie_day()
+        label = "Trending movies"
+    else:
+        results = trending.tv_day()
+        label = "Trending TV shows"
+
+    items = []
+    for m in results:
+        if m["id"] not in user_data[user]["watched"][mode]:
+            _, poster, desc, mid = extract_movie_info(
+                m, skip_trailer=True, mode=mode)
+            title = m.get("title") or m.get("name") or "Unknown"
+            items.append((mid, title, desc))
+        if len(items) >= 10:
+            break
+
+    if items:
+        await send_movie_list(
+            update.get_bot(), update.message.chat_id,
+            f"{label} today:", items, media_type=mt)
+    else:
+        await send_back_text(update, f"No {label.lower()} found.")
+
+
+async def person_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = get_user_id(update)
+    if check_user_invalid(user):
+        await unauthorized_msg(update)
+        return
+
+    if not context.args:
+        _pending_person[user] = True
+        await update.message.reply_text(
+            "Enter a person's name to search:",
+            reply_markup=ForceReply(selective=True))
+        return
+
+    query = ' '.join(context.args)
+    await do_person_search(update, query, user)
+
+
+async def do_person_search(update: Update, query: str, user: int) -> None:
+    results = search.people(query)
+    if not results or results["total_results"] == 0:
+        await send_back_text(update, f'No person found for "{query}".')
+        return
+
+    person = results["results"][0]
+    person_id = person["id"]
+    person_name = person.get("name", "Unknown")
+
+    mode = user_data[user].get("mode", "movie")
+    mt = _mode_to_type(mode)
+
+    try:
+        credits = person_api.combined_credits(person_id)
+    except Exception:
+        await send_back_text(update, f'Could not fetch credits for "{person_name}".')
+        return
+
+    cast_list = []
+    try:
+        for c in credits.get("cast", []):
+            media_type = c.get("media_type", "movie")
+            if (mode == "movie" and media_type == "movie") or \
+               (mode == "tv" and media_type == "tv"):
+                vote = c.get("vote_average", 0) or 0
+                vote_count = c.get("vote_count", 0) or 0
+                if vote_count > 0:
+                    _, poster, desc, mid = extract_movie_info(
+                        c, skip_trailer=True, mode=mode)
+                    title = c.get("title") or c.get("name") or "Unknown"
+                    cast_list.append((vote, mid, title, desc))
+    except (KeyError, TypeError, AttributeError):
+        pass
+
+    cast_list.sort(key=lambda x: x[0], reverse=True)
+    cast_list = cast_list[:20]
+
+    if cast_list:
+        movies_info = [(mid, title, desc)
+                       for _, mid, title, desc in cast_list]
+        label = "movies" if mode == "movie" else "TV shows"
+        await send_movie_list(
+            update.get_bot(), update.message.chat_id,
+            f"{person_name} - {label}:", movies_info, media_type=mt)
+    else:
+        label = "movies" if mode == "movie" else "TV shows"
+        await send_back_text(
+            update, f'No {label} found for "{person_name}".')
+
+
 async def toggle_mode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = get_user_id(update)
     if check_user_invalid(user):
@@ -2072,7 +2260,11 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             await query.answer(f'Already in "{already_in}" watchlist.', show_alert=True)
         else:
             if movie_id in user_data[user]["watched"][cb_mode]:
-                await query.answer("Warning: you already watched this!", show_alert=True)
+                prev_rating = user_data[user]["watched"][cb_mode][movie_id]
+                if isinstance(prev_rating, (int, float)) and prev_rating > 0:
+                    await query.answer(f"Warning: you already watched this (rated {prev_rating}/10)!", show_alert=True)
+                else:
+                    await query.answer("Warning: you already watched this!", show_alert=True)
             else:
                 await query.answer(f'Added to "{watchlist}".')
             user_data[user]["watchlists"][cb_mode][watchlist].append(movie_id)
@@ -2167,6 +2359,13 @@ async def reply_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             await do_search(update, text, user)
         return
 
+    # Handle pending person search
+    if user in _pending_person:
+        _pending_person.pop(user, None)
+        if text:
+            await do_person_search(update, text, user)
+        return
+
     # Handle pending new watchlist name
     if user in _pending_new_watchlist:
         movie_id, nwl_mode = _pending_new_watchlist.pop(user, (None, "movie"))
@@ -2235,6 +2434,9 @@ async def post_init(application):
         BotCommand("mode", "Switch between Movies and TV mode"),
         BotCommand("newseasons", "Check for new seasons of watched TV shows"),
         BotCommand("seasons", "View/edit watched seasons for TV shows"),
+        BotCommand("stats", "View your watch statistics"),
+        BotCommand("trending", "Show trending titles today"),
+        BotCommand("person", "Search by actor/director"),
     ])
     if application.job_queue:
         application.job_queue.run_daily(
@@ -2268,6 +2470,9 @@ def main():
     application.add_handler(CommandHandler(['mode', 'm'], toggle_mode))
     application.add_handler(CommandHandler(['newseasons', 'ns'], new_seasons))
     application.add_handler(CommandHandler(['seasons', 'ss'], view_seasons))
+    application.add_handler(CommandHandler('stats', stats))
+    application.add_handler(CommandHandler(['trending', 'tr'], trending_titles))
+    application.add_handler(CommandHandler(['person', 'ps'], person_search))
     application.add_handler(CommandHandler('clear', clear_chat))
     application.add_handler(CommandHandler('fix', fix_keyboard))
     application.add_handler(CallbackQueryHandler(button_callback_handler))
