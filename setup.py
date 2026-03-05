@@ -1,4 +1,4 @@
-from setuptools import setup
+from setuptools import setup, find_packages
 
 setup(
   name='tmdbot',
@@ -10,9 +10,7 @@ setup(
       "python-telegram-bot",
       "pyyaml"
   ],
-  scripts=[
-    'tmdbot.py',
-  ],
+  packages=find_packages(),
   entry_points={
     'console_scripts': ['tmdbot=tmdbot:main']
   },
