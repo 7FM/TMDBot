@@ -145,6 +145,25 @@ def check_user_invalid(user):
     return user not in settings['allowed_users']
 
 
+async def check_not_onboarded(update, user):
+    """Return True (and send a message) if the user hasn't completed onboarding."""
+    if not user_data.get(user, {}).get("onboarded", False):
+        await update.message.reply_text(
+            "Please complete onboarding first. Use /start to begin.")
+        return True
+    return False
+
+
+async def check_user(update, user):
+    """Check user is authorized AND onboarded. Returns True if blocked."""
+    if check_user_invalid(user):
+        await unauthorized_msg(update)
+        return True
+    if await check_not_onboarded(update, user):
+        return True
+    return False
+
+
 def get_movie_genres():
     genre_dict = dict()
     movie_genres = genre.movie_list()["genres"]
@@ -832,8 +851,7 @@ async def unauthorized_msg(update: Update) -> None:
 
 async def list_watchlists(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = get_user_id(update)
-    if check_user_invalid(user):
-        await unauthorized_msg(update)
+    if await check_user(update, user):
         return
 
     keyboard = build_watchlist_select_keyboard(user)
@@ -845,8 +863,7 @@ async def list_watchlists(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 async def show_my_providers(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = get_user_id(update)
-    if check_user_invalid(user):
-        await unauthorized_msg(update)
+    if await check_user(update, user):
         return
 
     keyboard = build_services_keyboard(user)
@@ -880,8 +897,7 @@ async def add_to_watchlist_helper(watchlist, media_id, user, update: Update):
 
 async def add_to_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = get_user_id(update)
-    if check_user_invalid(user):
-        await unauthorized_msg(update)
+    if await check_user(update, user):
         return
 
     if not context.args:
@@ -902,8 +918,7 @@ async def add_to_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 async def add_to_trash_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = get_user_id(update)
-    if check_user_invalid(user):
-        await unauthorized_msg(update)
+    if await check_user(update, user):
         return
 
     if not context.args:
@@ -916,8 +931,7 @@ async def add_to_trash_watchlist(update: Update, context: ContextTypes.DEFAULT_T
 
 async def add_to_watched(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = get_user_id(update)
-    if check_user_invalid(user):
-        await unauthorized_msg(update)
+    if await check_user(update, user):
         return
 
     if not context.args:
@@ -956,8 +970,7 @@ async def add_to_watched(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 async def remove_from_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = get_user_id(update)
-    if check_user_invalid(user):
-        await unauthorized_msg(update)
+    if await check_user(update, user):
         return
 
     if not context.args:
@@ -1079,8 +1092,7 @@ async def _do_recommend(bot, chat_id, user, watchlist, genre_filter=None):
 
 async def recommend(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = get_user_id(update)
-    if check_user_invalid(user):
-        await unauthorized_msg(update)
+    if await check_user(update, user):
         return
 
     mode = user_data[user].get("mode", "movie")
@@ -1101,8 +1113,7 @@ async def recommend(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def check_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = get_user_id(update)
-    if check_user_invalid(user):
-        await unauthorized_msg(update)
+    if await check_user(update, user):
         return
 
     my_providers = user_data[user]["providers"]
@@ -1167,8 +1178,7 @@ async def check_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 async def popular_movies(update: Update, context: CallbackContext) -> None:
     user = get_user_id(update)
-    if check_user_invalid(user):
-        await unauthorized_msg(update)
+    if await check_user(update, user):
         return
 
     if not user_data[user]["providers"]:
@@ -1339,8 +1349,7 @@ def _check_new_seasons_for_user(user, tick=None):
 
 async def new_seasons(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = get_user_id(update)
-    if check_user_invalid(user):
-        await unauthorized_msg(update)
+    if await check_user(update, user):
         return
 
     watched_tv = user_data[user].get("watched", {}).get("tv", {})
@@ -1408,8 +1417,7 @@ async def _daily_season_check(context: ContextTypes.DEFAULT_TYPE):
 
 async def view_seasons(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = get_user_id(update)
-    if check_user_invalid(user):
-        await unauthorized_msg(update)
+    if await check_user(update, user):
         return
 
     watched_tv = user_data[user].get("watched", {}).get("tv", {})
@@ -1512,8 +1520,7 @@ async def _do_pick(bot, chat_id, user, candidates, label, wl_cb_name):
 
 async def pick_movie(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = get_user_id(update)
-    if check_user_invalid(user):
-        await unauthorized_msg(update)
+    if await check_user(update, user):
         return
 
     if not user_data[user]["providers"]:
@@ -1537,8 +1544,7 @@ async def pick_movie(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 async def clear_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = get_user_id(update)
-    if check_user_invalid(user):
-        await unauthorized_msg(update)
+    if await check_user(update, user):
         return
 
     chat_id = update.message.chat_id
@@ -1597,8 +1603,7 @@ async def set_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = get_user_id(update)
-    if check_user_invalid(user):
-        await unauthorized_msg(update)
+    if await check_user(update, user):
         return
 
     mode = user_data[user].get("mode", "movie")
@@ -1677,8 +1682,7 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def trending_titles(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = get_user_id(update)
-    if check_user_invalid(user):
-        await unauthorized_msg(update)
+    if await check_user(update, user):
         return
 
     mode = user_data[user].get("mode", "movie")
@@ -1710,8 +1714,7 @@ async def trending_titles(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 async def person_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = get_user_id(update)
-    if check_user_invalid(user):
-        await unauthorized_msg(update)
+    if await check_user(update, user):
         return
 
     if not context.args:
@@ -1778,8 +1781,7 @@ async def do_person_search(update: Update, query: str, user: int) -> None:
 
 async def toggle_mode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = get_user_id(update)
-    if check_user_invalid(user):
-        await unauthorized_msg(update)
+    if await check_user(update, user):
         return
     current = user_data[user].get("mode", "movie")
     new_mode = "tv" if current == "movie" else "movie"
@@ -1842,8 +1844,7 @@ async def _send_rate_list(bot, chat_id, user):
 
 async def rate_movies(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = get_user_id(update)
-    if check_user_invalid(user):
-        await unauthorized_msg(update)
+    if await check_user(update, user):
         return
 
     mode = user_data[user].get("mode", "movie")
@@ -1897,8 +1898,7 @@ async def do_search(update: Update, query: str, user: int) -> None:
 
 async def search_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = get_user_id(update)
-    if check_user_invalid(user):
-        await unauthorized_msg(update)
+    if await check_user(update, user):
         return
 
     if not context.args:
@@ -1924,6 +1924,12 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
 
     raw = query.data
     action = raw.split(":", 1)[0]
+
+    # Allow onboarding-related callbacks before onboarding is complete
+    _ONBOARDING_ACTIONS = {"reg", "regp", "chreg", "sp"}
+    if action not in _ONBOARDING_ACTIONS and not user_data.get(user, {}).get("onboarded", False):
+        await query.answer("Please complete onboarding first. Use /start.", show_alert=True)
+        return
 
     if action == "nwl":
         mode = user_data[user].get("mode", "movie")
@@ -2929,8 +2935,7 @@ async def reply_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 async def default_search_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = get_user_id(update)
-    if check_user_invalid(user):
-        await unauthorized_msg(update)
+    if await check_user(update, user):
         return
 
     query = update.message.text.strip()
