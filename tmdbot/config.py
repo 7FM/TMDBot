@@ -126,9 +126,9 @@ def user_data_initialize():
 
 
 def init(settings_file, user_data_file):
-    global settings, movie_genre_dict, tv_genre_dict
+    global movie_genre_dict, tv_genre_dict
 
-    settings = load_settings(settings_file)
+    settings.update(load_settings(settings_file))
 
     tmdb.api_key = settings["tmdb_api_key"]
 
