@@ -96,6 +96,7 @@ def user_data_initialize():
             user_data[user]["onboarded"] = False
             user_data[user]["mode"] = "movie"
             user_data[user]["tv_season_counts"] = {}
+            user_data[user]["name"] = ""
         else:
             ud = user_data[user]
             # Migrate mode
@@ -115,6 +116,15 @@ def user_data_initialize():
             # Migrate tv_season_counts
             if "tv_season_counts" not in ud:
                 ud["tv_season_counts"] = {}
+    # Initialize shared watchlist storage (top-level)
+    if "shared_watchlists" not in user_data:
+        user_data["shared_watchlists"] = {}
+    if "_shared_wl_next_id" not in user_data:
+        user_data["_shared_wl_next_id"] = 1
+    # Normalize shared watchlist keys to integers (YAML may stringify them)
+    sw = user_data["shared_watchlists"]
+    if sw and any(isinstance(k, str) for k in sw):
+        user_data["shared_watchlists"] = {int(k): v for k, v in sw.items()}
     save_user_data()
 
 
@@ -205,6 +215,10 @@ _rec_genre_filter = {}  # user_id -> {"watchlist": str, "genres": set}
 _last_watched = {}
 _pending_season = {}  # user_id -> {"mid": int, "total": int, "media_type": str}
 _pending_person = {}  # user_id -> True (ForceReply state for person search)
+_pending_name = {}  # user_id -> True (ForceReply state for display name)
+_pending_shared_wl_name = {}  # user_id -> {"media_id": int|None, "mode": str}
+# user_id -> {"name": str, "media_id": int|None, "mode": str, "members": [user_ids]}
+_pending_shared_wl_members = {}
 
 _MODE_SWITCH_TV = "\U0001f4fa Switch to TV"
 _MODE_SWITCH_MOVIE = "\U0001f3ac Switch to Movies"
@@ -394,6 +408,54 @@ def find_all_watchlists(media_id, user, mode=None):
     return [wn for wn, w in user_data[user]["watchlists"][mode].items() if media_id in w]
 
 
+def _get_shared_wl(sw_id):
+    return user_data.get("shared_watchlists", {}).get(sw_id)
+
+
+def _next_shared_wl_id():
+    nid = user_data.get("_shared_wl_next_id", 1)
+    user_data["_shared_wl_next_id"] = nid + 1
+    return nid
+
+
+def _user_shared_watchlists(user):
+    return [(sw_id, sw) for sw_id, sw in user_data.get("shared_watchlists", {}).items()
+            if user in sw.get("members", [])]
+
+
+def _get_user_display_name(user_id):
+    ud = user_data.get(user_id, {})
+    return ud.get("name") or str(user_id)
+
+
+def is_in_any_shared_watchlist(media_id, user, mode=None):
+    if mode is None:
+        mode = user_data[user].get("mode", "movie")
+    for sw_id, sw in _user_shared_watchlists(user):
+        if media_id in sw.get("items", {}).get(mode, []):
+            return (sw_id, sw["name"])
+    return None
+
+
+def find_all_shared_watchlists(media_id, user, mode=None):
+    if mode is None:
+        mode = user_data[user].get("mode", "movie")
+    return [(sw_id, sw["name"]) for sw_id, sw in _user_shared_watchlists(user)
+            if media_id in sw.get("items", {}).get(mode, [])]
+
+
+async def _notify_shared_wl_members(bot, sw, acting_user, message_text, keyboard=None):
+    for member_id in sw.get("members", []):
+        if member_id != acting_user:
+            try:
+                await bot.send_message(
+                    member_id, esc(message_text),
+                    parse_mode=ParseMode.MARKDOWN_V2,
+                    reply_markup=keyboard or get_main_keyboard(member_id))
+            except Exception:
+                logger.warning(f"Failed to notify user {member_id}")
+
+
 def is_valid_media_id(media_id, mode="movie"):
     if not media_id.isdigit():
         return "ID is not a number"
@@ -533,6 +595,12 @@ def build_watchlist_picker_keyboard(media_id: int, user: int, mode=None) -> Inli
         if len(cb_data.encode('utf-8')) > 64:
             continue
         rows.append([InlineKeyboardButton(wn, callback_data=cb_data)])
+    for sw_id, sw in _user_shared_watchlists(user):
+        cb_data = f"sa:{mt}:{media_id}:{sw_id}"
+        if len(cb_data.encode('utf-8')) > 64:
+            continue
+        rows.append([InlineKeyboardButton(
+            f"\U0001F465 {sw['name']}", callback_data=cb_data)])
     rows.append([
         InlineKeyboardButton("New", callback_data=f"new:{mt}:{media_id}"),
         InlineKeyboardButton("Back", callback_data=f"back:{mt}:{media_id}")
@@ -569,13 +637,35 @@ def build_watchlist_select_keyboard(user: int, edit_mode: bool = False, mode=Non
         else:
             rows.append([InlineKeyboardButton(
                 f"{wn} ({count})", callback_data=f"wl:{wn}")])
+    if not edit_mode:
+        for sw_id, sw in _user_shared_watchlists(user):
+            count = len(sw.get("items", {}).get(mode, []))
+            rows.append([InlineKeyboardButton(
+                f"\U0001F465 {sw['name']} ({count})", callback_data=f"swb:{sw_id}")])
     if edit_mode:
+        for sw_id, sw in _user_shared_watchlists(user):
+            if sw["owner"] == user:
+                rows.append([InlineKeyboardButton(
+                    f"Delete \U0001F465 {sw['name']}?", callback_data=f"sdwl:{sw_id}")])
         rows.append([InlineKeyboardButton("Back", callback_data="wlback")])
     else:
         rows.append([
             InlineKeyboardButton("New watchlist", callback_data="nwl"),
+            InlineKeyboardButton("New shared", callback_data="nswl"),
             InlineKeyboardButton("Edit", callback_data="wledit")
         ])
+    return InlineKeyboardMarkup(rows)
+
+
+def build_member_select_keyboard(user: int, selected_members: list) -> InlineKeyboardMarkup:
+    rows = []
+    other_users = [u for u in settings["allowed_users"] if u != user]
+    for i, uid in enumerate(other_users):
+        name = _get_user_display_name(uid)
+        prefix = "\u2705 " if uid in selected_members else "\u274c "
+        rows.append([InlineKeyboardButton(
+            f"{prefix}{name}", callback_data=f"smu:{i}")])
+    rows.append([InlineKeyboardButton("Done \u2705", callback_data="smd")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -1487,6 +1577,24 @@ async def fix_keyboard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await update.message.reply_text("Keyboard restored.", reply_markup=get_main_keyboard(user))
 
 
+async def set_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = get_user_id(update)
+    if check_user_invalid(user):
+        await unauthorized_msg(update)
+        return
+    if not context.args:
+        current = user_data[user].get("name", "")
+        if current:
+            await send_back_text(update, f'Your current name is "{current}". Use /setname <name> to change it.')
+        else:
+            await send_back_text(update, "Use /setname <name> to set your display name.")
+        return
+    name = ' '.join(context.args)[:50]
+    user_data[user]["name"] = name
+    save_user_data()
+    await send_back_text(update, f'Display name set to "{name}".')
+
+
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = get_user_id(update)
     if check_user_invalid(user):
@@ -1827,6 +1935,164 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             reply_markup=ForceReply(selective=True))
         return
 
+    if action == "nswl":
+        mode = user_data[user].get("mode", "movie")
+        _pending_shared_wl_name[user] = {"media_id": None, "mode": mode}
+        await query.answer()
+        await query.get_bot().send_message(
+            query.message.chat_id,
+            "Enter a name for the new shared watchlist:",
+            reply_markup=ForceReply(selective=True))
+        return
+
+    if action == "smu":
+        index = int(raw.split(":", 1)[1])
+        if user not in _pending_shared_wl_members:
+            await query.answer("Session expired.", show_alert=True)
+            return
+        other_users = [u for u in settings["allowed_users"] if u != user]
+        if index < 0 or index >= len(other_users):
+            await query.answer("Invalid user.", show_alert=True)
+            return
+        uid = other_users[index]
+        members = _pending_shared_wl_members[user]["members"]
+        if uid in members:
+            members.remove(uid)
+            await query.answer(f"Removed {_get_user_display_name(uid)}.")
+        else:
+            members.append(uid)
+            await query.answer(f"Added {_get_user_display_name(uid)}.")
+        keyboard = build_member_select_keyboard(user, members)
+        await query.edit_message_reply_markup(reply_markup=keyboard)
+        return
+
+    if action == "smd":
+        if user not in _pending_shared_wl_members:
+            await query.answer("Session expired.", show_alert=True)
+            return
+        state = _pending_shared_wl_members[user]
+        members = state["members"]
+        if not members:
+            await query.answer("Select at least one member!", show_alert=True)
+            return
+        _pending_shared_wl_members.pop(user)
+        all_members = [user] + members
+        sw_id = _next_shared_wl_id()
+        sw_name = state["name"]
+        mode = state["mode"]
+        media_id = state.get("media_id")
+        items = {"movie": [], "tv": []}
+        if media_id is not None:
+            items[mode].append(media_id)
+        user_data["shared_watchlists"][sw_id] = {
+            "name": sw_name,
+            "owner": user,
+            "members": all_members,
+            "items": items,
+        }
+        save_user_data()
+        await query.answer(f'Created shared watchlist "{sw_name}"!')
+        try:
+            await query.message.delete()
+        except Exception:
+            await query.edit_message_reply_markup(reply_markup=None)
+        msg = f'Created shared watchlist "{sw_name}" with {len(members)} member(s).'
+        if media_id is not None:
+            msg += " Item added."
+        bot = query.get_bot()
+        chat_id = query.message.chat_id
+        await bot.send_message(
+            chat_id, esc(msg),
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=get_main_keyboard(user))
+        creator_name = _get_user_display_name(user)
+        for member_id in members:
+            try:
+                await bot.send_message(
+                    member_id,
+                    esc(f'{creator_name} added you to the shared watchlist "{sw_name}".'),
+                    parse_mode=ParseMode.MARKDOWN_V2,
+                    reply_markup=get_main_keyboard(member_id))
+            except Exception:
+                logger.warning(
+                    f"Failed to notify user {member_id} about shared watchlist creation")
+        return
+
+    if action == "sdwl":
+        try:
+            sw_id = int(raw.split(":", 1)[1])
+        except ValueError:
+            await query.answer("Invalid.", show_alert=True)
+            return
+        sw = _get_shared_wl(sw_id)
+        if sw is None:
+            await query.answer("Not found.", show_alert=True)
+            return
+        if sw["owner"] != user:
+            await query.answer("Only the owner can delete this.", show_alert=True)
+            return
+        count_m = len(sw.get("items", {}).get("movie", []))
+        count_t = len(sw.get("items", {}).get("tv", []))
+        total = count_m + count_t
+        confirm_text = f'Delete shared watchlist "{sw["name"]}"?'
+        if total > 0:
+            confirm_text += f' It contains {total} item{"s" if total != 1 else ""}.'
+        confirm_kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton(
+                "Yes, delete", callback_data=f"sdwly:{sw_id}"),
+            InlineKeyboardButton("Cancel", callback_data="sdwln")
+        ]])
+        await query.edit_message_text(
+            text=esc(confirm_text),
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=confirm_kb)
+        await query.answer()
+        return
+
+    if action == "sdwly":
+        try:
+            sw_id = int(raw.split(":", 1)[1])
+        except ValueError:
+            await query.answer("Invalid.", show_alert=True)
+            return
+        sw = _get_shared_wl(sw_id)
+        if sw is None:
+            await query.answer("Already deleted.", show_alert=True)
+            return
+        if sw["owner"] != user:
+            await query.answer("Only the owner can delete.", show_alert=True)
+            return
+        sw_name = sw["name"]
+        members = sw.get("members", [])
+        del user_data["shared_watchlists"][sw_id]
+        save_user_data()
+        await query.answer(f'Deleted "{sw_name}".')
+        keyboard = build_watchlist_select_keyboard(user)
+        await query.edit_message_text(
+            text="Select a watchlist:",
+            reply_markup=keyboard)
+        owner_name = _get_user_display_name(user)
+        bot = query.get_bot()
+        for member_id in members:
+            if member_id != user:
+                try:
+                    await bot.send_message(
+                        member_id,
+                        esc(f'{owner_name} deleted the shared watchlist "{sw_name}".'),
+                        parse_mode=ParseMode.MARKDOWN_V2,
+                        reply_markup=get_main_keyboard(member_id))
+                except Exception:
+                    pass
+        return
+
+    if action == "sdwln":
+        keyboard = build_watchlist_select_keyboard(user)
+        await query.edit_message_text(
+            text="Select a watchlist:",
+            reply_markup=keyboard)
+        await query.answer()
+        return
+
     if action == "wledit":
         keyboard = build_watchlist_select_keyboard(user, edit_mode=True)
         await query.edit_message_reply_markup(reply_markup=keyboard)
@@ -1887,11 +2153,21 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         user_data[user]["region"] = code
         _provider_cache.pop(code, None)
         save_user_data()
-        keyboard = build_services_keyboard(user)
-        await query.edit_message_text(
-            f"Region set to {_flag_emoji(code)} {_region_name(code)}.\n\nSelect your streaming services:",
-            reply_markup=keyboard)
-        await query.answer()
+        if not user_data[user].get("onboarded", False) and not user_data[user].get("name"):
+            _pending_name[user] = True
+            await query.edit_message_text(
+                f"Region set to {_flag_emoji(code)} {_region_name(code)}.")
+            await query.get_bot().send_message(
+                query.message.chat_id,
+                "What should other users call you? Enter your display name:",
+                reply_markup=ForceReply(selective=True))
+            await query.answer()
+        else:
+            keyboard = build_services_keyboard(user)
+            await query.edit_message_text(
+                f"Region set to {_flag_emoji(code)} {_region_name(code)}.\n\nSelect your streaming services:",
+                reply_markup=keyboard)
+            await query.answer()
         return
 
     if action == "regp":
@@ -2099,6 +2375,23 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             await _cleanup_rate_list(bot, user)
             msgs = await _send_rate_list(bot, chat_id, user)
             _rate_list_messages[user] = (chat_id, [m.message_id for m in msgs])
+        # Notify shared watchlist members about watched
+        shared_wls = find_all_shared_watchlists(mid, user, mode=rate_mode)
+        if shared_wls:
+            try:
+                api_tmp = get_api(rate_mode)
+                details_tmp = api_tmp.details(mid)
+                watch_title = details_tmp.get(
+                    "title") or details_tmp.get("name") or str(mid)
+            except Exception:
+                watch_title = str(mid)
+            for sw_id, sw_name in shared_wls:
+                sw = _get_shared_wl(sw_id)
+                if sw:
+                    rating_text = f" ({rating}/10)" if rating else ""
+                    await _notify_shared_wl_members(
+                        bot, sw, user,
+                        f'{_get_user_display_name(user)} watched "{watch_title}"{rating_text} from "{sw_name}".')
         return
 
     if action == "wl":
@@ -2252,6 +2545,86 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         await query.edit_message_reply_markup(reply_markup=keyboard)
         return
 
+    if action == "swb":
+        try:
+            sw_id = int(raw.split(":", 1)[1])
+        except (ValueError, IndexError):
+            await query.answer("Invalid.", show_alert=True)
+            return
+        sw = _get_shared_wl(sw_id)
+        if sw is None:
+            await query.answer("Shared watchlist not found.", show_alert=True)
+            return
+        if user not in sw.get("members", []):
+            await query.answer("You are not a member.", show_alert=True)
+            return
+        mode = user_data[user].get("mode", "movie")
+        mt = _mode_to_type(mode)
+        items = sw.get("items", {}).get(mode, [])
+        if not items:
+            await query.answer(f'"{sw["name"]}" has no {mode} items.', show_alert=True)
+            return
+        await query.answer()
+        api = get_api(mode)
+        movies_info = []
+        for mid in items:
+            try:
+                details = api.details(mid)
+                _, _, desc, _ = extract_movie_info(details, mode=mode)
+                title = details.get("title") or details.get(
+                    "name") or "Unknown"
+                movies_info.append((mid, title, desc))
+            except Exception:
+                continue
+        await send_movie_list(
+            query.get_bot(), query.message.chat_id,
+            f'\U0001F465 {sw["name"]}:',
+            movies_info, detail_action="swdet", media_type=mt)
+        return
+
+    if action == "swdet":
+        parts = raw.split(":", 2)
+        if len(parts) < 3:
+            await query.answer("Invalid.", show_alert=True)
+            return
+        det_mt = parts[1]
+        mid = int(parts[2])
+        det_mode = _type_to_mode(det_mt)
+        api = get_api(det_mode)
+        try:
+            details = api.details(mid, append_to_response="watch/providers")
+        except Exception:
+            await query.answer("Failed to load details.", show_alert=True)
+            return
+        _, poster_path, desc, _ = extract_movie_info(details, mode=det_mode)
+        shared_wls = find_all_shared_watchlists(mid, user, mode=det_mode)
+        buttons = []
+        for sid, sname in shared_wls:
+            cb = f"srm:{det_mt}:{mid}:{sid}"
+            if len(cb.encode('utf-8')) <= 64:
+                buttons.append([InlineKeyboardButton(
+                    f"Remove from \U0001F465 {sname}", callback_data=cb)])
+        watchlist_name = is_in_any_watchlist(mid, user, mode=det_mode)
+        if not watchlist_name:
+            buttons.append([InlineKeyboardButton(
+                "Add to personal", callback_data=f"pick:{det_mt}:{mid}")])
+        already_watched = mid in user_data[user].get(
+            "watched", {}).get(det_mode, {})
+        if not already_watched:
+            buttons.append([InlineKeyboardButton(
+                "Watched", callback_data=f"w:{det_mt}:{mid}")])
+        keyboard = InlineKeyboardMarkup(buttons)
+        await query.answer()
+        bot = query.get_bot()
+        chat_id = query.message.chat_id
+        if poster_path:
+            await bot.send_photo(chat_id, poster_path, caption=esc(desc),
+                                 parse_mode=ParseMode.MARKDOWN_V2, reply_markup=keyboard)
+        else:
+            await bot.send_message(chat_id, esc(desc),
+                                   parse_mode=ParseMode.MARKDOWN_V2, reply_markup=keyboard)
+        return
+
     action, media_type, movie_id, watchlist = parse_callback_data(raw)
     if movie_id is None:
         await query.answer("Invalid action.", show_alert=True)
@@ -2303,6 +2676,113 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
                 new_keyboard = build_media_keyboard(
                     movie_id, user, mode=cb_mode)
                 await query.edit_message_reply_markup(reply_markup=new_keyboard)
+
+    elif action == "sa":
+        try:
+            sw_id = int(watchlist)
+        except (ValueError, TypeError):
+            await query.answer("Invalid.", show_alert=True)
+            return
+        sw = _get_shared_wl(sw_id)
+        if sw is None:
+            await query.answer("Shared watchlist not found.", show_alert=True)
+            return
+        if user not in sw.get("members", []):
+            await query.answer("You are not a member.", show_alert=True)
+            return
+        items = sw.get("items", {}).get(cb_mode, [])
+        if movie_id in items:
+            await query.answer(f'Already in "{sw["name"]}".', show_alert=True)
+            return
+        if movie_id in user_data[user]["watched"][cb_mode]:
+            prev_rating = user_data[user]["watched"][cb_mode][movie_id]
+            if isinstance(prev_rating, (int, float)) and prev_rating > 0:
+                await query.answer(f"Warning: you already watched this (rated {prev_rating}/10)!", show_alert=True)
+            else:
+                await query.answer("Warning: you already watched this!", show_alert=True)
+        else:
+            await query.answer(f'Added to "{sw["name"]}".')
+        sw["items"].setdefault(cb_mode, []).append(movie_id)
+        save_user_data()
+        bot = query.get_bot()
+        if _is_search_message(user, query.message.message_id):
+            await _cleanup_search_results(bot, user)
+            await bot.send_message(
+                query.message.chat_id,
+                esc(f'Added to shared watchlist "{sw["name"]}".'),
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=get_main_keyboard(user))
+        else:
+            new_keyboard = build_media_keyboard(movie_id, user, mode=cb_mode)
+            await query.edit_message_reply_markup(reply_markup=new_keyboard)
+        try:
+            api = get_api(cb_mode)
+            details = api.details(movie_id)
+            title = details.get("title") or details.get("name") or "Unknown"
+        except Exception:
+            title = str(movie_id)
+        await _notify_shared_wl_members(
+            bot, sw, user,
+            f'{_get_user_display_name(user)} added "{title}" to "{sw["name"]}".')
+
+    elif action == "srm":
+        try:
+            sw_id = int(watchlist)
+        except (ValueError, TypeError):
+            await query.answer("Invalid.", show_alert=True)
+            return
+        sw = _get_shared_wl(sw_id)
+        if sw is None:
+            await query.answer("Shared watchlist not found.", show_alert=True)
+            return
+        if user not in sw.get("members", []):
+            await query.answer("You are not a member.", show_alert=True)
+            return
+        items = sw.get("items", {}).get(cb_mode, [])
+        if movie_id not in items:
+            await query.answer("Item not in this watchlist.", show_alert=True)
+            return
+        items.remove(movie_id)
+        save_user_data()
+        await query.answer(f'Removed from "{sw["name"]}".')
+        try:
+            await query.message.delete()
+        except Exception:
+            await query.edit_message_reply_markup(reply_markup=None)
+        try:
+            api = get_api(cb_mode)
+            details = api.details(movie_id)
+            title = details.get("title") or details.get("name") or "Unknown"
+        except Exception:
+            title = str(movie_id)
+        mt = _mode_to_type(cb_mode)
+        actor_name = _get_user_display_name(user)
+        for member_id in sw.get("members", []):
+            if member_id == user:
+                continue
+            already_watched = movie_id in user_data.get(
+                member_id, {}).get("watched", {}).get(cb_mode, {})
+            try:
+                if already_watched:
+                    await query.get_bot().send_message(
+                        member_id,
+                        esc(
+                            f'{actor_name} removed "{title}" from "{sw["name"]}".'),
+                        parse_mode=ParseMode.MARKDOWN_V2,
+                        reply_markup=get_main_keyboard(member_id))
+                else:
+                    watched_kb = InlineKeyboardMarkup([[
+                        InlineKeyboardButton(
+                            "Watched", callback_data=f"w:{mt}:{movie_id}")
+                    ]])
+                    await query.get_bot().send_message(
+                        member_id,
+                        esc(
+                            f'{actor_name} removed "{title}" from "{sw["name"]}". Mark as watched?'),
+                        parse_mode=ParseMode.MARKDOWN_V2,
+                        reply_markup=watched_kb)
+            except Exception:
+                logger.warning(f"Failed to notify user {member_id}")
 
     elif action == "rm":
         removed = False
@@ -2390,6 +2870,38 @@ async def reply_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             await do_person_search(update, text, user)
         return
 
+    # Handle pending display name (onboarding)
+    if user in _pending_name:
+        _pending_name.pop(user, None)
+        if text:
+            user_data[user]["name"] = text.strip()[:50]
+            save_user_data()
+            keyboard = build_services_keyboard(user)
+            await update.message.reply_text(
+                f"Nice to meet you, {text.strip()[:50]}!\n\nSelect your streaming services:",
+                reply_markup=keyboard)
+        else:
+            await send_back_text(update, "Name cannot be empty. Use /start to try again.")
+        return
+
+    # Handle pending shared watchlist name
+    if user in _pending_shared_wl_name:
+        state = _pending_shared_wl_name.pop(user)
+        if not text:
+            await send_back_text(update, "Name cannot be empty.")
+            return
+        _pending_shared_wl_members[user] = {
+            "name": text.strip()[:50],
+            "media_id": state.get("media_id"),
+            "mode": state.get("mode", "movie"),
+            "members": [],
+        }
+        keyboard = build_member_select_keyboard(user, [])
+        await update.message.reply_text(
+            f'Select members for "{text.strip()[:50]}":',
+            reply_markup=keyboard)
+        return
+
     # Handle pending new watchlist name
     if user in _pending_new_watchlist:
         movie_id, nwl_mode = _pending_new_watchlist.pop(user, (None, "movie"))
@@ -2461,6 +2973,7 @@ async def post_init(application):
         BotCommand("stats", "View your watch statistics"),
         BotCommand("trending", "Show trending titles today"),
         BotCommand("person", "Search by actor/director"),
+        BotCommand("setname", "Set your display name"),
     ])
     if application.job_queue:
         application.job_queue.run_daily(
@@ -2495,10 +3008,12 @@ def main():
     application.add_handler(CommandHandler(['newseasons', 'ns'], new_seasons))
     application.add_handler(CommandHandler(['seasons', 'ss'], view_seasons))
     application.add_handler(CommandHandler('stats', stats))
-    application.add_handler(CommandHandler(['trending', 'tr'], trending_titles))
+    application.add_handler(CommandHandler(
+        ['trending', 'tr'], trending_titles))
     application.add_handler(CommandHandler(['person', 'ps'], person_search))
     application.add_handler(CommandHandler('clear', clear_chat))
     application.add_handler(CommandHandler('fix', fix_keyboard))
+    application.add_handler(CommandHandler('setname', set_name))
     application.add_handler(CallbackQueryHandler(button_callback_handler))
     application.add_handler(MessageHandler(
         filters.TEXT & ~filters.COMMAND & filters.REPLY,
