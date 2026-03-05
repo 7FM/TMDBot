@@ -1536,7 +1536,7 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         text += "\nRating distribution:\n"
         for bucket, count in buckets.items():
             bars = round(bar_width * count / max_count) if max_count > 0 else 0
-            text += f"{bucket}: {'█' * bars} {count}\n"
+            text += f"`{bucket:>4}: {'█' * bars}{'░' * (bar_width - bars)} {count}`\n"
 
     # Fetch genres with progress bar
     api = get_api(mode)
