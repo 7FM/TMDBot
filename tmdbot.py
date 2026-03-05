@@ -158,6 +158,30 @@ tv_genre_dict = get_tv_genres()
 def get_genre_dict(mode):
     return movie_genre_dict if mode == "movie" else tv_genre_dict
 
+
+def _count_released_seasons(details):
+    """Count seasons that have aired (excludes specials and unaired seasons)."""
+    try:
+        seasons = details.get("seasons") or details["seasons"]
+    except (KeyError, AttributeError, TypeError):
+        return details.get("number_of_seasons") or 0
+    if not seasons:
+        return details.get("number_of_seasons") or 0
+    today = datetime.date.today().isoformat()
+    count = 0
+    for s in seasons:
+        try:
+            sn = s.get("season_number", 0)
+            if sn == 0:
+                continue
+            air_date = s.get("air_date")
+        except (AttributeError, TypeError):
+            continue
+        if air_date and air_date <= today:
+            count += 1
+    return count if count > 0 else (details.get("number_of_seasons") or 1)
+
+
 # Helper functions
 
 
@@ -341,7 +365,7 @@ def extract_movie_info(m, skip_trailer=False, mode="movie"):
     if date_str:
         parts.append(date_str)
     if mode == "tv":
-        seasons = m.get("number_of_seasons")
+        seasons = _count_released_seasons(m)
         if seasons:
             parts.append(f"{seasons} season{'s' if seasons != 1 else ''}")
     if genres:
@@ -821,7 +845,7 @@ async def add_to_watched(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if mode == "tv":
         try:
             details = tv.details(media_id)
-            num_seasons = details.get("number_of_seasons") or 1
+            num_seasons = _count_released_seasons(details)
         except Exception:
             num_seasons = 1
         _pending_season[user] = {"mid": media_id,
@@ -1207,7 +1231,7 @@ def _check_new_seasons_for_user(user, tick=None):
             if details is None:
                 continue
             title = details.get("name") or details.get("title") or "Unknown"
-            current_total = details.get("number_of_seasons") or 0
+            current_total = _count_released_seasons(details)
             if mid in stored:
                 old_total = stored[mid].get("total", 0)
                 watched_season = stored[mid].get("watched", old_total)
@@ -1319,7 +1343,7 @@ async def view_seasons(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             total_s = season_data.get("total", "?")
             season_str = f"Watched: S{watched_s}/{total_s}"
         else:
-            total_s = details.get("number_of_seasons") or "?"
+            total_s = _count_released_seasons(details) or "?"
             season_str = f"Watched: ?/{total_s}"
         rating_str = f"{rating}/10" if rating else "unrated"
         movies_info.append(
@@ -2151,7 +2175,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         mid = int(parts[2])
         try:
             details = tv.details(mid)
-            num_seasons = details.get("number_of_seasons") or 1
+            num_seasons = _count_released_seasons(details)
         except Exception:
             num_seasons = 1
         _pending_season[user] = {"mid": mid,
@@ -2306,7 +2330,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         if media_type == "tv":
             try:
                 details = tv.details(movie_id)
-                num_seasons = details.get("number_of_seasons") or 1
+                num_seasons = _count_released_seasons(details)
             except Exception:
                 num_seasons = 1
             _pending_season[user] = {
