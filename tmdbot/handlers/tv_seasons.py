@@ -53,7 +53,8 @@ class NewSeasonsCommand(BaseCommand):
         else:
             parts.append("No new seasons detected for your watched shows.")
         if newly_recorded:
-            parts.append(f"Recorded season data for {newly_recorded} new show(s).")
+            parts.append(
+                f"Recorded season data for {newly_recorded} new show(s).")
         if parts:
             await send_back_text(update, " ".join(parts))
 

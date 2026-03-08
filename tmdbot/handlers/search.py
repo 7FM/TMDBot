@@ -84,7 +84,8 @@ async def handle_smore(query, user, raw):
     await query.answer()
     bot = query.get_bot()
     chat_id = query.message.chat_id
-    batch = state._search_results[user][1] if user in state._search_results else []
+    batch = state._search_results[user][1] if user in state._search_results else [
+    ]
     mode = state.user_data[user].get("mode", "movie")
     for _, poster_path, caption, mid in next_batch:
         keyboard = build_media_keyboard(mid, user, mode=mode)

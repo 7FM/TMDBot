@@ -1,13 +1,12 @@
-import yaml
 import logging
 from tmdbv3api import TMDb, Movie, TV, Search, Genre, Provider, Trending, Person
 
-from tmdbot import state
+from botlib import state
+from botlib.config import settings, load_settings
 
 logger = logging.getLogger(__name__)
 
 # These are set by init()
-settings = {}
 tmdb = TMDb()
 movie = Movie()
 tv = TV()
@@ -39,11 +38,6 @@ REGIONS = [
     ("VE", "Venezuela"), ("ZA", "South Africa"),
 ]
 REGIONS_PER_PAGE = 8
-
-
-def load_settings(file_path):
-    with open(file_path, 'r') as file:
-        return yaml.safe_load(file)
 
 
 def get_api(mode):

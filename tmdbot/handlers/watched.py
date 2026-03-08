@@ -84,9 +84,11 @@ async def _send_rate_list(bot, chat_id, user):
     mt = _mode_to_type(mode)
     api = get_api(mode)
     watched = state.user_data[user]["watched"][mode]
-    unrated = [(mid, entry) for mid, entry in watched.items() if get_watched_rating(entry) is None]
+    unrated = [(mid, entry) for mid, entry in watched.items()
+               if get_watched_rating(entry) is None]
     rated = sorted(
-        [(mid, entry) for mid, entry in watched.items() if get_watched_rating(entry) is not None],
+        [(mid, entry) for mid, entry in watched.items()
+         if get_watched_rating(entry) is not None],
         key=lambda x: -get_watched_rating(x[1]))
     ordered = unrated + rated
     total = len(ordered)
@@ -95,7 +97,8 @@ async def _send_rate_list(bot, chat_id, user):
         num_threads = min(multiprocessing.cpu_count(), 8)
         results = {}
         with concurrent.futures.ThreadPoolExecutor(max_workers=num_threads) as executor:
-            futures = {executor.submit(api.details, mid): mid for mid, _ in ordered}
+            futures = {executor.submit(
+                api.details, mid): mid for mid, _ in ordered}
             for future in concurrent.futures.as_completed(futures):
                 mid = futures[future]
                 try:
@@ -148,7 +151,8 @@ async def handle_rate(query, user, raw):
     rate_mode = _type_to_mode(mt)
     # Save undo state
     prev_wls = find_all_watchlists(mid, user, mode=rate_mode)
-    prev_rating = state.user_data[user]["watched"][rate_mode].get(mid, "absent")
+    prev_rating = state.user_data[user]["watched"][rate_mode].get(
+        mid, "absent")
     prev_season_data = state.user_data[user]["tv_season_counts"].get(
         mid, "absent") if rate_mode == "tv" else None
     state._last_watched[user] = {"mid": mid, "watchlists": prev_wls,
@@ -162,8 +166,10 @@ async def handle_rate(query, user, raw):
         category = state._pending_watched_category.pop(user).get("category")
     else:
         # Preserve existing category when re-rating
-        category = get_watched_category(prev_rating) if prev_rating != "absent" else None
-    state.user_data[user]["watched"][rate_mode][mid] = {"rating": rating, "category": category}
+        category = get_watched_category(
+            prev_rating) if prev_rating != "absent" else None
+    state.user_data[user]["watched"][rate_mode][mid] = {
+        "rating": rating, "category": category}
     # Save season tracking data for TV shows
     if rate_mode == "tv" and user in state._pending_season and state._pending_season[user]["mid"] == mid:
         pending = state._pending_season.pop(user)
@@ -203,7 +209,8 @@ async def handle_rate(query, user, raw):
     if action == "rrate" and user in state._rate_list_messages:
         await _cleanup_rate_list(bot, user)
         msgs = await _send_rate_list(bot, chat_id, user)
-        state._rate_list_messages[user] = (chat_id, [m.message_id for m in msgs])
+        state._rate_list_messages[user] = (
+            chat_id, [m.message_id for m in msgs])
     # Notify shared watchlist members about watched
     shared_wls = find_all_shared_watchlists(mid, user, mode=rate_mode)
     if shared_wls:
@@ -262,7 +269,8 @@ async def handle_undo(query, user, raw):
         chat_id = query.message.chat_id
         await _cleanup_rate_list(bot, user)
         msgs = await _send_rate_list(bot, chat_id, user)
-        state._rate_list_messages[user] = (chat_id, [m.message_id for m in msgs])
+        state._rate_list_messages[user] = (
+            chat_id, [m.message_id for m in msgs])
 
 
 async def handle_w_action(query, user, movie_id, media_type, cb_mode):
@@ -348,7 +356,8 @@ async def handle_wcat(query, user, raw):
         if isinstance(entry, dict):
             entry["category"] = new_cat
         else:
-            state.user_data[user]["watched"][mode][mid] = {"rating": entry, "category": new_cat}
+            state.user_data[user]["watched"][mode][mid] = {
+                "rating": entry, "category": new_cat}
         state.save_user_data()
         cat_label = new_cat or "none"
         await query.answer(f"Category changed to {cat_label}.")
@@ -357,7 +366,8 @@ async def handle_wcat(query, user, raw):
             chat_id = query.message.chat_id
             await _cleanup_rate_list(bot, user)
             msgs = await _send_rate_list(bot, chat_id, user)
-            state._rate_list_messages[user] = (chat_id, [m.message_id for m in msgs])
+            state._rate_list_messages[user] = (
+                chat_id, [m.message_id for m in msgs])
         else:
             try:
                 await query.message.delete()

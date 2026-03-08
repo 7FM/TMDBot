@@ -8,10 +8,14 @@ setup(
   install_requires=[
       "tmdbv3api",
       "python-telegram-bot",
-      "pyyaml"
+      "pyyaml",
+      "requests",
   ],
   packages=find_packages(),
   entry_points={
-    'console_scripts': ['tmdbot=tmdbot:main']
+    'console_scripts': [
+      'tmdbot=tmdbot:main',
+      'bookbot=bookbot:main',
+    ]
   },
 )

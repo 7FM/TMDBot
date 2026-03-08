@@ -4,72 +4,124 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-TMDBot is a Telegram bot for discovering and managing movies and TV shows using The Movie Database (TMDb) API. It provides search, watchlist management (personal and shared/collaborative), streaming provider integration, rating, recommendation features, random picker, new season detection, person search, trending titles, watch statistics, and user onboarding — with a per-user mode switch between Movies and TV.
+This repository contains two Telegram bots sharing a common library (`botlib/`):
+
+- **TMDBot** — movies and TV shows using [The Movie Database (TMDb)](https://www.themoviedb.org/) API
+- **BookBot** — books using the [Open Library](https://openlibrary.org/) API
+
+Both bots provide search, watchlist management (personal and shared/collaborative), rating, recommendations, trending, person/author search, statistics, and user onboarding. TMDBot additionally has streaming provider integration, TV season tracking, and a movie/TV mode switch.
 
 ## Build & Run
 
 This project uses **Nix flakes** for environment management with **direnv** integration.
 
 - **Enter dev shell:** `nix develop` (or automatic via direnv)
-- **Run directly:** `python -m tmdbot [settings.yaml] [user_data.yaml]`
-- **Build Nix package:** `nix build`
-- **Run built package:** `./result/bin/tmdbot`
-- **Format code:** `autopep8 --in-place -r tmdbot/`
+- **Run TMDBot:** `python -m tmdbot [settings.yaml] [user_data.yaml]`
+- **Run BookBot:** `python -m bookbot [settings.yaml] [user_data.yaml]`
+- **Build Nix packages:** `nix build .#tmdbot` / `nix build .#bookbot`
+- **Run built package:** `./result/bin/tmdbot` / `./result/bin/bookbot`
+- **Format code:** `autopep8 --in-place -r tmdbot/ bookbot/ botlib/`
 
 There are no tests in this project.
 
 ## Configuration
 
-Two YAML files (git-ignored) are required at runtime:
-- `settings.yaml` — Telegram bot token, TMDb API key, allowed user IDs
-- `user_data.yaml` — Per-user state (mode, name, watchlists nested by mode, providers, watched history nested by mode with `{rating, category}` entries, region, onboarded flag, `tv_season_counts` for season tracking) plus top-level `shared_watchlists` dict, `_shared_wl_next_id` counter, and `_version` (schema version for migrations); auto-created if missing
+Each bot needs its own settings YAML (git-ignored):
+
+**TMDBot** (`settings.yaml`):
+- `telegram_token` — Telegram bot token
+- `tmdb_api_key` — TMDb API key
+- `allowed_users` — list of allowed Telegram user IDs
+
+**BookBot** (`bookbot_settings.yaml`):
+- `telegram_token` — Telegram bot token
+- `email` — email for Open Library API identification (required for 3 req/s rate limit)
+- `allowed_users` — list of allowed Telegram user IDs
+
+User data is stored in `user_data.yaml` (auto-created). Each bot should use a separate user data file. Both files can be overridden via command line arguments.
 
 ## Architecture
 
-**Package structure:** The bot is organized as a Python package (`tmdbot/`):
+### Package structure
 
 ```
-tmdbot/
-├── __init__.py          # from tmdbot.app import main
-├── __main__.py          # from tmdbot import main; main()
-├── config.py            # Settings, TMDb API client init (deferred via init()), regions, genre caches, user_data_initialize()
-├── migration.py         # Versioned user data migrations (CURRENT_VERSION=1, migrate(), _iter_users())
-├── state.py             # All global state dicts (mutable module-level), save/load user data
-├── helpers.py           # Text escaping, media info extraction, provider logic, watchlist lookups, parse_callback_data, mode converters, get_watched_rating/get_watched_category
-├── keyboards.py         # All build_*_keyboard() functions, get_main_keyboard()
-├── messaging.py         # send_back_text, send_movie_message, send_movie_list, progress bar, cleanup helpers, _notify_shared_wl_members
-├── base.py              # BaseCommand class (auth + onboarding check, delegates to execute())
-├── router.py            # Router class — callback dispatcher with action→handler table and onboarding exemptions
-├── reply_handler.py     # reply_handler() for ForceReply dispatch (delegates to handler modules)
-├── handlers/
-│   ├── __init__.py
-│   ├── search.py        # SearchCommand + do_search() + smore, det, rdet, exp/col callbacks + default_search_handler
-│   ├── watchlist.py     # ListCommand, AddCommand, TrashAddCommand, RemoveCommand + wl, nwl, wledit, wlback, dwl/dwly/dwln callbacks + fallback handler (pick, back, a, rm, new, sa, srm, w, ws)
-│   ├── shared_wl.py     # nswl, smu, smd, sdwl/sdwly/sdwln, swb, swdet callbacks (no command — all callback-driven from /list)
-│   ├── watched.py       # WatchedCommand, RateCommand + rate/rrate, undo, wcat, ccat callbacks + w/ws action helpers
-│   ├── discovery.py     # RecommendCommand, CheckCommand, PopularCommand, PickCommand + gf, recgo, rpick, rwl callbacks
-│   ├── tv_seasons.py    # NewSeasonsCommand, ViewSeasonsCommand + sdet, supd callbacks + _daily_season_check
-│   ├── info.py          # StatsCommand, TrendingCommand, PersonCommand + do_person_search()
-│   ├── onboarding.py    # StartCommand, ServicesCommand + reg, regp, chreg, sp callbacks + name reply handler
-│   └── misc.py          # FixCommand, SetNameCommand, ToggleModeCommand, ClearCommand
-└── app.py               # main(), post_init(), error_handler(), handler registration loop
+botlib/                          # Shared library
+├── __init__.py
+├── state.py                     # All global state dicts, save/load user data
+├── config.py                    # load_settings(), settings dict
+├── helpers.py                   # esc(), watchlist lookups, parse_callback_data, mode converters, watched accessors
+├── keyboards.py                 # Rating, watchlist, chunk, member, category keyboards (configurable labels)
+├── messaging.py                 # send_back_text, send_movie_message/list, progress bar, cleanup, notifications
+├── base.py                      # BaseCommand class (auth + onboarding check)
+├── router.py                    # Router class — callback dispatcher
+├── migration.py                 # Migration framework (run_migrations, _iter_users)
+└── reply_handler.py             # ForceReply dispatch with registry for domain handlers
+
+tmdbot/                          # Movie/TV bot
+├── __init__.py                  # from tmdbot.app import main
+├── __main__.py                  # from tmdbot import main; main()
+├── state.py                     # sys.modules redirect → botlib.state
+├── base.py                      # sys.modules redirect → botlib.base
+├── router.py                    # sys.modules redirect → botlib.router
+├── messaging.py                 # sys.modules redirect → botlib.messaging
+├── config.py                    # TMDb API clients, genre caches, REGIONS, user_data_initialize()
+├── migration.py                 # TMDb-specific migrations (uses botlib.migration.run_migrations)
+├── helpers.py                   # Re-exports botlib helpers + extract_movie_info, providers, trailers, genres
+├── keyboards.py                 # Re-exports botlib keyboards + get_main_keyboard, mode switch, region, services, genre, season keyboards
+├── reply_handler.py             # Registers TMDb-specific pending handlers (search, person, name) with botlib
+├── app.py                       # main(), post_init(), error_handler(), handler registration
+└── handlers/
+    ├── search.py                # SearchCommand + do_search() + smore, det, rdet, exp/col callbacks + default_search_handler
+    ├── watchlist.py             # ListCommand, AddCommand, TrashAddCommand, RemoveCommand + wl, nwl, wledit, wlback, dwl/dwly/dwln + fallback handler (pick, back, a, rm, new, sa, srm, w, ws)
+    ├── shared_wl.py             # nswl, smu, smd, sdwl/sdwly/sdwln, swb, swdet callbacks
+    ├── watched.py               # WatchedCommand, RateCommand + rate/rrate, undo, wcat, ccat + w/ws action helpers
+    ├── discovery.py             # RecommendCommand, CheckCommand, PopularCommand, PickCommand + gf, recgo, rpick, rwl callbacks
+    ├── tv_seasons.py            # NewSeasonsCommand, ViewSeasonsCommand + sdet, supd + _daily_season_check
+    ├── info.py                  # StatsCommand, TrendingCommand, PersonCommand + do_person_search()
+    ├── onboarding.py            # StartCommand, ServicesCommand + reg, regp, chreg, sp callbacks + name reply handler
+    └── misc.py                  # FixCommand, SetNameCommand, ToggleModeCommand, ClearCommand
+
+bookbot/                         # Book bot
+├── __init__.py                  # from bookbot.app import main
+├── __main__.py                  # from bookbot import main; main()
+├── config.py                    # Open Library API client (rate-limited requests.Session), user_data_initialize()
+├── migration.py                 # Book-specific migrations
+├── helpers.py                   # extract_book_info, extract_book_detail, cover URLs, work_key_to_id/id_to_work_key
+├── keyboards.py                 # get_main_keyboard (no mode toggle, no /check)
+├── reply_handler.py             # Registers book-specific pending handlers (search, author, name) with botlib
+├── app.py                       # main(), post_init(), error_handler(), handler registration
+└── handlers/
+    ├── search.py                # SearchCommand + do_search() + smore, det, rdet, exp/col + default_search_handler
+    ├── watchlist.py             # ListCommand, AddCommand, RemoveCommand + fallback handler
+    ├── shared_wl.py             # nswl, smu, smd, sdwl/sdwly/sdwln, swb, swdet callbacks
+    ├── read.py                  # ReadCommand, RateCommand + rate/rrate, undo, wcat, ccat + w action helpers
+    ├── discovery.py             # RecommendCommand, PickCommand, TrendingCommand
+    ├── info.py                  # StatsCommand, AuthorCommand + do_author_search()
+    ├── onboarding.py            # StartCommand + name reply handler (no region/providers)
+    └── misc.py                  # FixCommand, SetNameCommand, ClearCommand
 ```
 
-**Key layers:**
+### Key architectural patterns
 
-1. **`config.py`**: TMDb API clients and settings are initialized lazily via `config.init(settings_file, user_data_file)` called from `main()`. No import-time side effects. Calls `migration.migrate()` before `user_data_initialize()`.
-1b. **`migration.py`**: Versioned data migrations. `CURRENT_VERSION` tracks the schema version. `migrate()` runs all pending `_migrate_to_vN` functions over all user entries (integer keys) and saves. Version stored as `_version` in `user_data.yaml`.
-2. **`state.py`**: All mutable global state (pending dicts, caches, user data) as module-level variables. Mutations visible across all importers. `next_chunk_id()` helper for the integer counter.
-3. **`helpers.py`**: Pure utility functions — text escaping (`esc()`), media info extraction, provider logic, watchlist lookup helpers, callback data parsing, mode converters.
-4. **`keyboards.py`**: All `build_*_keyboard()` functions and `get_main_keyboard()`.
-5. **`messaging.py`**: `send_back_text()`, `send_movie_message()`, `send_movie_list()`, progress bar, cleanup helpers, notification helper.
-6. **`base.py`**: `BaseCommand` class with `__call__(update, context)` → auth check → onboarding check → `execute(update, context, user)`. Set `require_onboarding = False` to skip the onboarding gate.
-7. **`router.py`**: `Router` class holds action→handler dispatch table. Handler modules populate it via `register()`. Acts as the `CallbackQueryHandler` callable. Supports `add_onboarding_action()` for pre-onboarding callbacks.
-8. **Handler modules**: Each exports a `register(app, router)` function that registers its own `CommandHandler`s and `router.add()` calls. Self-contained per feature area.
-9. **`app.py`**: Thin orchestrator — calls `config.init()`, creates `Application`, iterates `_HANDLER_MODULES` calling `register()`, adds global handlers, starts polling.
+**Shared library (`botlib/`):** Contains all domain-agnostic infrastructure. Both bots import from it directly. The `tmdbot/` package maintains backward-compatible imports via `sys.modules` redirects (e.g., `tmdbot/state.py` redirects to `botlib.state` so both packages share the same mutable state object).
+
+**Registry pattern:** `botlib` uses registries to break circular dependencies with domain packages:
+- `botlib.messaging.register_main_keyboard_fn(fn)` — domain provides its `get_main_keyboard`
+- `botlib.keyboards.configure_labels(overrides)` — domain overrides button text (e.g., BookBot sets `"watched": "Read"`)
+- `botlib.reply_handler.register_pending_handler(check_fn, handler_fn)` — domain registers ForceReply handlers
+
+**Re-export pattern:** `tmdbot/helpers.py` and `tmdbot/keyboards.py` re-export generic functions from `botlib` (via `from botlib.helpers import ... # noqa: F401`) alongside domain-specific functions. This allows existing handler code to use `from tmdbot.helpers import esc` without change. `bookbot/` handlers import from `botlib` directly.
 
 **Import dependency graph (no cycles):**
-`state` ← `config` ← `helpers` ← `keyboards` ← `messaging` ← `base` ← `handlers/*` → `router` ← `app`
+`botlib.state` ← `botlib.config` ← `botlib.helpers` ← `botlib.keyboards` ← `botlib.messaging` ← `botlib.base` ← `handlers/*` → `botlib.router` ← `app`
+
+Domain packages (`tmdbot/`, `bookbot/`) import from `botlib` and add domain-specific layers.
+
+**Mode system:** Each mode has a type prefix for callback data:
+- `"movie"` ↔ `"m"`, `"tv"` ↔ `"tv"`, `"book"` ↔ `"b"`
+- Converters: `_mode_to_type(mode)`, `_type_to_mode(media_type)` in `botlib.helpers`
+- TMDBot users have `mode` field (`"movie"` or `"tv"`); BookBot users always use `mode="book"`
+- All user data (watchlists, watched) is nested by mode
 
 **BaseCommand pattern:**
 
@@ -98,74 +150,86 @@ def register(app, router):
 
 Adding a new feature = adding one handler file + one entry in `_HANDLER_MODULES` in `app.py`.
 
-**Callback routing:** The `Router` in `router.py` dispatches by action prefix. The fallback handler in `watchlist.py` handles `parse_callback_data`-based actions (`pick`, `back`, `a`, `rm`, `new`, `sa`, `srm`, `w`, `ws`).
+**Migration framework:** `botlib.migration.run_migrations(current_version, migrations)` iterates all integer-keyed user entries and runs pending migration functions. Domain packages define their own `CURRENT_VERSION` and migration list. Version stored as `_version` in `user_data.yaml`.
 
-**Key patterns (unchanged from before refactoring):**
+### State management
 
-- User state is `state.user_data` dict persisted to YAML via `state.save_user_data()`
-- `user_data_initialize()` in `config.py` handles new user creation; `migration.py` handles versioned schema migrations
-- Watched entries are dicts: `{"rating": int|None, "category": str|None}`. Use `get_watched_rating(entry)` and `get_watched_category(entry)` from `helpers.py` to access fields
-- Text output uses `send_back_text()` which escapes for MarkdownV2, splits long messages, and always restores the persistent keyboard
-- Movie search results use `send_movie_message()` which attaches inline keyboard buttons (Add/Remove/Watched); search result message IDs are tracked in `state._search_results` for cleanup after user action
-- List-based views use `send_movie_list(bot, chat_id, ...)` which produces chunked itemized lists with expand/collapse buttons
-- `extract_movie_info(m, skip_trailer=False, mode="movie")` — handles both movie and TV fields
-- `/check` and `/recommend` use `_with_progress_bar(bot, chat_id, label, total, work_fn)` for background ThreadPoolExecutor work with live progress bar
-- `/popular` uses `ThreadPoolExecutor` for parallel provider lookups with a simple status message
-- All provider lookups go through `get_api(mode).details(id, append_to_response="watch/providers")` + `_parse_providers_from_details`
-- Search results show 5 at a time with a "Show more" button; remaining results are stored in `state._search_more` per user
-- Marking an item as watched sends a confirmation with the main keyboard, then a separate "Undo?" message with an inline button. Each watched entry stores `{"rating": int|None, "category": str|None}` where category is the watchlist it was watched from
-- When watching from search (not in any watchlist), a category picker is shown first so the user can tag it. When watching from a watchlist, the category is set automatically
-- For TV shows, the watched flow adds a season picker step: `[Watched]` → (category picker if from search) → season picker (`ws:` callback) → rating keyboard → save
-- `/recommend` without args shows a category picker (watchlists + "All"). Recommendations seed from the chosen watchlist's items plus highly-rated watched items with matching category. This prevents e.g. trash movies from polluting normal recommendations
-- `/newseasons` (`/ns`) checks all watched TV shows for new seasons. A daily `JobQueue` job (`_daily_season_check`) runs at 9:00 AM
+All mutable global state lives in `botlib.state` as module-level variables:
+- `user_data` — persisted to YAML via `save_user_data()`
+- Pending dicts: `_pending_new_watchlist`, `_pending_search`, `_pending_person`, `_pending_name`, `_pending_shared_wl_name`, `_pending_shared_wl_members`, `_pending_season`, `_pending_watched_category`
+- Caches/tracking: `_provider_cache`, `_chunk_movies`, `_chunk_id_counter`, `_search_results`, `_search_more`, `_rate_list_messages`, `_rec_genre_filter`, `_last_watched`
 
-**Inline keyboard & callback system:**
+### Callback system
 
-All button presses route through `Router.__call__()` using colon-delimited callback data (must fit in 64 bytes). Most actions use `action:type:id` format where type is `"m"` (movie) or `"tv"` (TV show). `parse_callback_data()` returns `(action, media_type, media_id, watchlist)`. Action prefixes:
-- `pick:type:id` — show watchlist picker; `a:type:id:watchlist` — add to watchlist; `rm:type:id` — remove; `w:type:id` — mark watched (for TV: shows season picker then rating; for movies: shows rating keyboard with skip option)
-- `back:type:id` — return from picker to Add/Watched buttons; `new:type:id` — create new watchlist (ForceReply) and add item
-- `rate:type:id:0-10` — submit rating (from search/watchlist context, 0=skip); `rrate:type:id:0-10` — submit rating (from `/rate` flow, triggers list refresh)
-- `wl:<name>` — browse watchlist contents (uses current mode); `det:type:id` — show full detail card; `rdet:type:id` — show item with rating keyboard (from `/rate` list)
-- `exp:<chunk_id>` / `col:<chunk_id>` — expand/collapse item button lists
-- `nwl` — new watchlist from list view (ForceReply, stores mode); `wledit` / `wlback` — enter/exit edit mode; `dwl:<name>` / `dwly:<name>` / `dwln` — delete watchlist flow (uses current mode)
-- `sp:<index>` — toggle streaming provider (first selection completes onboarding)
-- `reg:<code>` — select region; `regp:<page>` — region picker pagination; `chreg` — change region
-- `rpick:<watchlist|*>` — pick another random available item (`*` = all watchlists, uses current mode)
-- `smore` — show next 5 search results (uses current mode)
-- `gf:<genre_id>` — toggle genre in recommendation filter; `recgo:skip` / `recgo:filter` — launch recommendations (all genres or filtered)
-- `rwl:<index|all>` — select watchlist category for recommendations (index into watchlist names, or "all")
-- `wcat:<index|s>` — select category when marking watched from search (index into watchlist names, `s` = skip); also used for change-category flow
-- `ccat:type:id` — initiate change category for an already-watched item (shown in `rdet` detail view)
-- `ws:type:id:season` — season picked in TV watched flow (then shows rating keyboard)
-- `sdet:tv:id` — show season detail from `/seasons` list (shows season picker to update)
-- `supd:tv:id:season` — update watched season from `/seasons` view
-- `undo` — undo last "mark as watched" action (restores watchlist placement, previous rating, and season data, uses stored mode)
-- Shared watchlist callbacks: `nswl` — new shared watchlist (ForceReply for name, then member selection); `smu:<index>` — toggle member; `smd` — done selecting members; `swb:<sw_id>` — browse shared watchlist; `swdet:type:id` — detail card from shared context; `sa:type:id:sw_id` — add to shared watchlist; `srm:type:id:sw_id` — remove from shared watchlist; `sdwl:<sw_id>` / `sdwly:<sw_id>` / `sdwln` — delete shared watchlist flow (owner only)
+All button presses route through `Router.__call__()` using colon-delimited callback data (must fit in 64 bytes). Most actions use `action:type:id` format where type is `"m"` (movie), `"tv"` (TV show), or `"b"` (book). `parse_callback_data()` returns `(action, media_type, media_id, watchlist)`. The fallback handler in `watchlist.py` handles `parse_callback_data`-based actions (`pick`, `back`, `a`, `rm`, `new`, `sa`, `srm`, `w`, `ws`).
 
-**Onboarding:** New users (flagged with `onboarded: false`) get a region picker → **display name prompt (ForceReply)** → streaming service selector flow on `/start`. Region picker is paginated with flag emojis. Onboarding completes automatically when the first service is selected.
+Action prefixes (shared):
+- `pick:type:id` — show watchlist picker; `a:type:id:watchlist` — add to watchlist; `rm:type:id` — remove; `w:type:id` — mark watched/read
+- `back:type:id` — return from picker; `new:type:id` — create new watchlist (ForceReply) and add item
+- `rate:type:id:0-10` — submit rating (0=skip); `rrate:type:id:0-10` — submit rating from `/rate` flow (triggers list refresh)
+- `wl:<name>` — browse watchlist; `det:type:id` — detail card; `rdet:type:id` — detail with rating keyboard
+- `exp:<chunk_id>` / `col:<chunk_id>` — expand/collapse item lists
+- `nwl` — new watchlist; `wledit` / `wlback` — enter/exit edit mode; `dwl/dwly/dwln` — delete watchlist flow
+- `wcat:<index|s>` — category picker; `ccat:type:id` — change category for watched/read item
+- `rwl:<index|all>` — recommendation category picker
+- `smore` — show next search results; `undo` — undo last watch/read
+- Shared: `nswl`, `smu:<index>`, `smd`, `swb:<sw_id>`, `swdet:type:id`, `sa:type:id:sw_id`, `srm:type:id:sw_id`, `sdwl/sdwly/sdwln`
 
-**Message cleanup:** Search results are tracked per-user in `state._search_results` and deleted after user action (add/remove/watched), with a confirmation message sent to restore `MAIN_KEYBOARD`. `state._search_more` and `state._pending_search` state are also cleaned up alongside search results. Rate list messages are tracked in `state._rate_list_messages` and refreshed after rating via `rrate` (but not `rate` from other contexts). Previous search results are also cleaned up when a new search starts.
+TMDBot-specific:
+- `sp:<index>` — toggle streaming provider; `reg:<code>` / `regp:<page>` / `chreg` — region
+- `gf:<genre_id>` — genre filter; `recgo:skip` / `recgo:filter` — launch recommendations
+- `rpick:<watchlist|*>` — random pick; `ws:type:id:season` — season picker; `sdet:tv:id` / `supd:tv:id:season` — season detail/update
 
-**Mode system:** Each user has a `"mode"` field (`"movie"` or `"tv"`). The dynamic keyboard (`get_main_keyboard(user)`) shows a toggle button. `/mode` command and the keyboard button both toggle the mode. All commands operate on the current mode's watchlists, watched history, genre dict, and API client. Callback data carries a type prefix (`"m"` or `"tv"`) so buttons remain valid regardless of the user's current mode. Data migration in `user_data_initialize()` wraps old flat structures into nested `{"movie": old_data, "tv": empty}`.
+### Key patterns
 
-**Shared watchlists:** Stored in a top-level `shared_watchlists` dict in `user_data.yaml` (keyed by numeric ID, not nested under users). Each entry has `name`, `owner` (user ID), `members` (list of user IDs), and `items` (nested by mode like personal watchlists). `_shared_wl_next_id` tracks the next available ID. Helper functions: `_get_shared_wl()`, `_next_shared_wl_id()`, `_user_shared_watchlists()`, `_get_user_display_name()`, `is_in_any_shared_watchlist()`, `find_all_shared_watchlists()`. Creation flow: name (ForceReply) → member selection (toggle keyboard like streaming services) → create. Any member can add/remove items; only owner can delete. Marking watched is personal (item stays in shared list). Notifications via `_notify_shared_wl_members()` are sent when items are added/removed/watched. When an item is removed, members who haven't watched it get a "Watched" button. `/list` shows both personal and shared (prefixed with 👥) watchlists. The watchlist picker when adding items also includes shared watchlists. `/setname` lets users set/change their display name.
+- Watched/read entries are dicts: `{"rating": int|None, "category": str|None}`. Use `get_watched_rating(entry)` and `get_watched_category(entry)` from `botlib.helpers` to access fields
+- Text output uses `send_back_text()` which escapes for MarkdownV2, splits long messages, and restores the persistent keyboard
+- Search results use `send_movie_message()` with inline keyboard buttons; message IDs tracked in `state._search_results` for cleanup
+- List views use `send_movie_list()` with chunked expand/collapse buttons
+- Long operations use `_with_progress_bar(bot, chat_id, label, total, work_fn)` for background ThreadPoolExecutor work
+- Marking watched/read: confirmation with main keyboard + separate "Undo?" inline button
+- Category from watchlist is set automatically; category picker shown when watching/reading from search
+- `ForceReply` prompts with pending state dicts, dispatched by `reply_handler()`. Plain text input defaults to search
+- MarkdownV2 escaping: `esc()` preserves `[text](url)` links and `` `code` `` spans
 
-**Multi-step interactions** use `ForceReply` prompts with pending state dicts (`state._pending_new_watchlist` stores `(movie_id, mode)`, `state._pending_search`, `state._pending_person`, `state._pending_name`, `state._pending_shared_wl_name`, `state._pending_watched_category`), handled by `reply_handler()` in `reply_handler.py`. `_pending_watched_category` is used for both the watched-from-search category picker and the change-category flow (distinguished by `"change_only"` flag). Plain text input (non-reply) defaults to search via `default_search_handler()`. `/fix` restores the persistent keyboard if ForceReply causes it to disappear.
+### Shared watchlists
 
-**MarkdownV2 escaping:** `esc()` uses regex to preserve `[text](url)` links (escaping text inside brackets, escaping `\` and `)` in URLs) and `` `code` `` spans, while `_esc_plain()` escapes all reserved characters in plain text. tmdbv3api's `AsObj` wrapper raises `AttributeError` instead of `KeyError` for missing keys — catch both in try/except blocks.
+Stored in top-level `shared_watchlists` dict in `user_data.yaml` (keyed by numeric ID). Each entry has `name`, `owner`, `members`, `items` (nested by mode). `_shared_wl_next_id` tracks IDs. Creation: name (ForceReply) → member selection → create. Any member can add/remove; only owner can delete. Notifications via `_notify_shared_wl_members()`.
+
+## TMDBot-specific
+
+**Mode system:** Per-user `"mode"` field (`"movie"` or `"tv"`). Dynamic keyboard shows toggle button. Callback data carries type prefix so buttons stay valid across mode switches.
+
+**Streaming providers:** Region-based provider setup during onboarding. `/check` checks availability, `/popular` shows popular titles on user's services.
+
+**TV seasons:** `tv_season_counts` per-user dict. Watched flow: `[Watched]` → (category if from search) → season picker → rating. Daily `JobQueue` job checks for new seasons at 9:00 AM.
+
+**Recommendations:** Category-aware seeding. `/recommend` without args shows category picker. Genre filtering via toggle keyboard.
+
+**Person search:** `/person` searches actors/directors, shows top 20 results filtered by current mode.
 
 **Dependencies:** `python-telegram-bot`, `tmdbv3api` (v1.9.0, custom Nix build), `pyyaml`
 
+## BookBot-specific
+
+**Open Library API:** Direct `requests` usage against `openlibrary.org` REST API. Rate-limited at 3 requests/second with `threading.Lock`. User-Agent set to `BookBot/0.1 ({email})` using email from settings.
+
+**API functions** in `bookbot/config.py`: `ol_search()`, `ol_work()`, `ol_search_authors()`, `ol_author_works()`, `ol_trending()`, `ol_subject()`.
+
+**Work IDs:** Open Library OLIDs like `/works/OL27482W` are converted to numeric IDs (`27482`) for callback data compatibility. Converters: `work_key_to_id()`, `id_to_work_key()` in `bookbot/helpers.py`.
+
+**No mode toggle:** BookBot always uses `mode="book"`. No region/provider setup. Onboarding is name-entry only.
+
+**Recommendations:** Subject-based, seeded from read books' subjects.
+
+**Dependencies:** `python-telegram-bot`, `pyyaml`, `requests`
+
 ## Bot Commands
 
-Commands are registered with short aliases (e.g., `/search`/`/s`, `/list`/`/l`, `/recommend`/`/r`, `/pick`/`/p`, `/mode`/`/m`, `/newseasons`/`/ns`, `/seasons`/`/ss`, `/trending`/`/tr`, `/person`/`/ps`). Each handler module's `register()` function adds its own commands. The dynamic persistent reply keyboard provides quick access to `/search`, `/list`, `/check`, `/recommend`, `/popular`, `/pick`, `/clear`, and the mode toggle button. `/fix` restores the keyboard if lost. Plain text without a command triggers a search. `/search` and `/person` without args use ForceReply for immediate input. `/setname <name>` sets or changes the user's display name (used in shared watchlist notifications and member selection).
+### TMDBot
 
-**Season tracking:** `tv_season_counts` is a per-user dict mapping TV show media IDs to `{"total": int, "watched": int}`. `total` is the last-known number of seasons from TMDb; `watched` is the season the user watched up to. Populated automatically when marking a TV show as watched (season picker step) and checked by `/newseasons` and the daily job.
+Commands registered with aliases: `/search`/`/s`, `/list`/`/l`, `/recommend`/`/r`, `/pick`/`/p`, `/mode`/`/m`, `/newseasons`/`/ns`, `/seasons`/`/ss`, `/trending`/`/tr`, `/person`/`/ps`. Dynamic persistent keyboard provides quick access. Plain text without a command triggers search. `/fix` restores keyboard.
 
-**Stats:** `/stats` shows watch statistics for the current mode — total watched count, rated/unrated counts, average rating, rating distribution (bar chart), and top genres. Genre fetching uses `_with_progress_bar` since it requires per-item API calls.
+### BookBot
 
-**Trending:** `/trending` (alias `/tr`) shows trending titles for the current mode using TMDb's `Trending` API (`trending.movie_day()` / `trending.tv_day()`). Displays 10 results via `send_movie_list()`, filters out already-watched items.
-
-**Person search:** `/person` (alias `/ps`) searches for an actor/director via `search.people()`, fetches their `combined_credits` via `person_api`, filters by current mode, sorts by rating, and displays top 20 results via `send_movie_list()`. Uses `state._pending_person` state for ForceReply when called without args.
-
-**Duplicate warning:** When adding an already-watched item to a watchlist, the warning includes the user's previous rating (e.g., "rated 7/10") if one exists.
+Commands registered with aliases: `/search`/`/s`, `/list`/`/l`, `/recommend`/`/r`, `/pick`/`/p`, `/trending`/`/tr`, `/author`/`/ps`. Persistent keyboard for quick access. Plain text triggers search.

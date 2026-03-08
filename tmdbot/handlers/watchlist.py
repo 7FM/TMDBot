@@ -99,7 +99,8 @@ async def _add_to_watchlist_helper(watchlist, media_id, user, update):
         await send_back_text(update, f'Already in your "{already_in}" watchlist.')
     else:
         if media_id in state.user_data[user]["watched"][mode]:
-            prev_rating = get_watched_rating(state.user_data[user]["watched"][mode][media_id])
+            prev_rating = get_watched_rating(
+                state.user_data[user]["watched"][mode][media_id])
             if isinstance(prev_rating, (int, float)) and prev_rating > 0:
                 await send_back_text(update, f"Warning: you already watched this (rated {prev_rating}/10)!")
             else:
@@ -230,14 +231,16 @@ async def _handle_fallback(query, user, raw):
             await query.answer(f'Already in "{already_in}" watchlist.', show_alert=True)
         else:
             if movie_id in state.user_data[user]["watched"][cb_mode]:
-                prev_rating = get_watched_rating(state.user_data[user]["watched"][cb_mode][movie_id])
+                prev_rating = get_watched_rating(
+                    state.user_data[user]["watched"][cb_mode][movie_id])
                 if isinstance(prev_rating, (int, float)) and prev_rating > 0:
                     await query.answer(f"Warning: you already watched this (rated {prev_rating}/10)!", show_alert=True)
                 else:
                     await query.answer("Warning: you already watched this!", show_alert=True)
             else:
                 await query.answer(f'Added to "{watchlist}".')
-            state.user_data[user]["watchlists"][cb_mode][watchlist].append(movie_id)
+            state.user_data[user]["watchlists"][cb_mode][watchlist].append(
+                movie_id)
             state.save_user_data()
             if _is_search_message(user, query.message.message_id):
                 await _cleanup_search_results(query.get_bot(), user)
@@ -308,7 +311,8 @@ async def _handle_sa(query, user, movie_id, watchlist, cb_mode, media_type):
         await query.answer(f'Already in "{sw["name"]}".', show_alert=True)
         return
     if movie_id in state.user_data[user]["watched"][cb_mode]:
-        prev_rating = get_watched_rating(state.user_data[user]["watched"][cb_mode][movie_id])
+        prev_rating = get_watched_rating(
+            state.user_data[user]["watched"][cb_mode][movie_id])
         if isinstance(prev_rating, (int, float)) and prev_rating > 0:
             await query.answer(f"Warning: you already watched this (rated {prev_rating}/10)!", show_alert=True)
         else:

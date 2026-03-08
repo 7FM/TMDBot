@@ -1,6 +1,4 @@
 import sys
-import re
-import datetime
 import logging
 
 from telegram import Update, BotCommand
@@ -9,56 +7,40 @@ from telegram.ext import (
     MessageHandler, filters,
 )
 
-from tmdbot import config
+from bookbot import config
 from botlib.router import Router
 from botlib.messaging import register_main_keyboard_fn
-from tmdbot.reply_handler import reply_handler
-from tmdbot.keyboards import _MODE_SWITCH_TV, _MODE_SWITCH_MOVIE, get_main_keyboard
-from tmdbot.handlers import (
+from botlib.keyboards import configure_labels
+from bookbot.reply_handler import reply_handler
+from bookbot.keyboards import get_main_keyboard
+from bookbot.handlers import (
     onboarding, search, watchlist, shared_wl,
-    watched, discovery, tv_seasons, info, misc,
+    read, discovery, info, misc,
 )
 
 logger = logging.getLogger(__name__)
 
 _HANDLER_MODULES = [
     onboarding, search, watchlist, shared_wl,
-    watched, discovery, tv_seasons, info, misc,
+    read, discovery, info, misc,
 ]
 
 
 async def post_init(application):
     await application.bot.set_my_commands(commands=[
-        BotCommand("start", "OKAAAAY LETS GO!!!"),
-        BotCommand("search", "Search by keywords"),
-        BotCommand("list", "Browse your watchlists"),
-        BotCommand("add", "Add to your watchlist"),
-        BotCommand("tadd", "Add to your trash watchlist"),
-        BotCommand("watched", "Mark as watched"),
-        BotCommand("remove", "Remove from all watchlists"),
-        BotCommand("rate", "Rate or re-rate watched items"),
-        BotCommand("services", "Manage my streaming services"),
-        BotCommand("check", "Check streaming availability for your watchlist"),
-        BotCommand("recommend", "Get recommendations based on your watchlist"),
-        BotCommand("popular", "Show popular titles on your streaming services"),
-        BotCommand("pick", "Pick a random title from your watchlists"),
-        BotCommand("mode", "Switch between Movies and TV mode"),
-        BotCommand("newseasons", "Check for new seasons of watched TV shows"),
-        BotCommand("seasons", "View/edit watched seasons for TV shows"),
-        BotCommand("stats", "View your watch statistics"),
-        BotCommand("trending", "Show trending titles today"),
-        BotCommand("person", "Search by actor/director"),
+        BotCommand("start", "Get started!"),
+        BotCommand("search", "Search for books"),
+        BotCommand("list", "Browse your reading lists"),
+        BotCommand("add", "Add to reading list"),
+        BotCommand("read", "Mark as read"),
+        BotCommand("rate", "Rate or re-rate read books"),
+        BotCommand("recommend", "Get book recommendations"),
+        BotCommand("trending", "Trending books today"),
+        BotCommand("pick", "Random book from your lists"),
+        BotCommand("author", "Search by author"),
+        BotCommand("stats", "View your reading statistics"),
         BotCommand("setname", "Set your display name"),
     ])
-    if application.job_queue:
-        from tmdbot.handlers.tv_seasons import _daily_season_check
-        application.job_queue.run_daily(
-            _daily_season_check,
-            time=datetime.time(hour=9, minute=0),
-        )
-    else:
-        logger.warning("JobQueue not available. Daily season check disabled. "
-                       "Install python-telegram-bot[job-queue] to enable.")
 
 
 async def error_handler(update, context):
@@ -82,8 +64,9 @@ def main():
 
     config.init(settings_file, user_data_file)
 
-    # Register domain-specific main keyboard with botlib
+    # Register domain-specific overrides with botlib
     register_main_keyboard_fn(get_main_keyboard)
+    configure_labels({"watched": "Read"})
 
     application = Application.builder().token(
         config.settings["telegram_token"]).post_init(post_init).build()
@@ -96,11 +79,6 @@ def main():
     application.add_handler(MessageHandler(
         filters.TEXT & ~filters.COMMAND & filters.REPLY,
         reply_handler
-    ))
-    application.add_handler(MessageHandler(
-        filters.Regex(
-            f"^({re.escape(_MODE_SWITCH_TV)}|{re.escape(_MODE_SWITCH_MOVIE)})$"),
-        misc.ToggleModeCommand()
     ))
     application.add_handler(MessageHandler(
         filters.TEXT & ~filters.COMMAND & ~filters.REPLY,

@@ -36,7 +36,8 @@ class RecommendCommand(BaseCommand):
             if watchlist not in state.user_data[user]["watchlists"][mode]:
                 await send_back_text(update, f'Watchlist "{watchlist}" not found.')
                 return
-            state._rec_genre_filter[user] = {"watchlist": watchlist, "genres": set()}
+            state._rec_genre_filter[user] = {
+                "watchlist": watchlist, "genres": set()}
             keyboard = build_genre_picker_keyboard(set(), mode=mode)
             await update.message.reply_text(
                 "Filter recommendations by genre (or skip for all):",
@@ -98,7 +99,8 @@ class CheckCommand(BaseCommand):
                     title = details.get("title") or details.get(
                         "name") or "Unknown"
                     provider_str = create_available_at_str(prov)
-                    movies_info.append((mid, title, desc + "\n" + provider_str))
+                    movies_info.append(
+                        (mid, title, desc + "\n" + provider_str))
                 await send_movie_list(
                     update.get_bot(), update.message.chat_id,
                     f'Items on your {wn} watchlist available on streaming services:',
@@ -147,7 +149,8 @@ class PopularCommand(BaseCommand):
         num_threads = min(multiprocessing.cpu_count(), 8)
         pop_items = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=num_threads) as executor:
-            futures = [executor.submit(check_popular_item, m) for m in candidates]
+            futures = [executor.submit(check_popular_item, m)
+                       for m in candidates]
             for future in futures:
                 if future.cancelled():
                     continue

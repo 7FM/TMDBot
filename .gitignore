@@ -1,6 +1,5 @@
 __pycache__
 .direnv
 .cache
-user_data.yaml
-settings.yaml
+*.yaml
 result

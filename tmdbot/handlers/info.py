@@ -57,7 +57,8 @@ class StatsCommand(BaseCommand):
         if ratings:
             text += "\nRating distribution:\n"
             for bucket, count in buckets.items():
-                bars = round(bar_width * count / max_count) if max_count > 0 else 0
+                bars = round(bar_width * count /
+                             max_count) if max_count > 0 else 0
                 text += f"`{bucket:>4}: {'█' * bars}{'░' * (bar_width - bars)} {count}`\n"
         api = get_api(mode)
         mids = list(watched.keys())
