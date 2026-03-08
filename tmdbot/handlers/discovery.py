@@ -12,6 +12,7 @@ from tmdbot.base import BaseCommand
 from tmdbot.helpers import (
     extract_movie_info, esc,
     is_in_any_watchlist, is_available_for_free,
+    get_watched_rating, get_watched_category,
     _parse_providers_from_details, _match_providers,
     create_available_at_str,
     _mode_to_type,
@@ -19,6 +20,7 @@ from tmdbot.helpers import (
 from tmdbot.keyboards import (
     get_main_keyboard, build_media_keyboard,
     build_genre_picker_keyboard,
+    build_recommend_category_keyboard,
 )
 from tmdbot.messaging import (
     send_back_text, send_movie_list,
@@ -29,17 +31,21 @@ from tmdbot.messaging import (
 class RecommendCommand(BaseCommand):
     async def execute(self, update, context, user):
         mode = state.user_data[user].get("mode", "movie")
-        watchlist = "normal"
         if context.args:
             watchlist = context.args[0]
-        if watchlist not in state.user_data[user]["watchlists"][mode]:
-            await send_back_text(update, f'Watchlist "{watchlist}" not found.')
-            return
-        state._rec_genre_filter[user] = {"watchlist": watchlist, "genres": set()}
-        keyboard = build_genre_picker_keyboard(set(), mode=mode)
-        await update.message.reply_text(
-            "Filter recommendations by genre (or skip for all):",
-            reply_markup=keyboard)
+            if watchlist not in state.user_data[user]["watchlists"][mode]:
+                await send_back_text(update, f'Watchlist "{watchlist}" not found.')
+                return
+            state._rec_genre_filter[user] = {"watchlist": watchlist, "genres": set()}
+            keyboard = build_genre_picker_keyboard(set(), mode=mode)
+            await update.message.reply_text(
+                "Filter recommendations by genre (or skip for all):",
+                reply_markup=keyboard)
+        else:
+            keyboard = build_recommend_category_keyboard(user, mode=mode)
+            await update.message.reply_text(
+                "Recommend based on which category?",
+                reply_markup=keyboard)
 
 
 class CheckCommand(BaseCommand):
@@ -256,18 +262,32 @@ async def _do_recommend(bot, chat_id, user, watchlist, genre_filter=None):
     mode = state.user_data[user].get("mode", "movie")
     mt = _mode_to_type(mode)
     api = get_api(mode)
-    sources = [(mid, 1.0)
-               for mid in state.user_data[user]["watchlists"][mode][watchlist]]
-    rated_watched = sorted(
-        [(mid, r) for mid, r in state.user_data[user]["watched"][mode].items()
-         if r is not None and r >= 7],
-        key=lambda x: -x[1])[:20]
+    # Unwatched seeds from watchlist(s)
+    if watchlist == "all":
+        wl_items = []
+        for wl in state.user_data[user]["watchlists"][mode].values():
+            wl_items.extend(wl)
+        sources = [(mid, 1.0) for mid in set(wl_items)]
+    else:
+        sources = [(mid, 1.0)
+                   for mid in state.user_data[user]["watchlists"][mode][watchlist]]
+    # Watched seeds filtered by category
+    rated_watched = []
+    for mid, entry in state.user_data[user]["watched"][mode].items():
+        r = get_watched_rating(entry)
+        if r is None or r < 7:
+            continue
+        cat = get_watched_category(entry)
+        if watchlist == "all" or cat == watchlist:
+            rated_watched.append((mid, r))
+    rated_watched.sort(key=lambda x: -x[1])
+    rated_watched = rated_watched[:20]
     sources.extend((mid, rating / 10.0) for mid, rating in rated_watched)
 
     if not sources:
         await bot.send_message(
             chat_id,
-            esc(f'Your "{watchlist}" watchlist is empty and you have no highly-rated watched items.'),
+            esc('No sources found. Your watchlists are empty and you have no highly-rated watched items in this category.'),
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=get_main_keyboard(user))
         return
@@ -332,15 +352,16 @@ async def _do_recommend(bot, chat_id, user, watchlist, genre_filter=None):
             provider_str = create_available_at_str(prov)
             movies_info.append((mid, title, caption + "\n" + provider_str))
         label = "Recommended based on" if mode == "movie" else "Recommended shows based on"
+        wl_label = "all watchlists" if watchlist == "all" else f'"{watchlist}" watchlist'
         await send_movie_list(
             bot, chat_id,
-            f'{label} your "{watchlist}" watchlist:',
+            f'{label} your {wl_label}:',
             movies_info, media_type=mt)
     else:
+        wl_label = "all watchlists" if watchlist == "all" else f'"{watchlist}" watchlist'
         await bot.send_message(
             chat_id,
-            esc(
-                f'No recommendations found based on your "{watchlist}" watchlist.'),
+            esc(f'No recommendations found based on your {wl_label}.'),
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=get_main_keyboard(user))
 
@@ -392,6 +413,28 @@ async def handle_rpick(query, user, raw):
                    candidates, label, wl_name)
 
 
+async def handle_rwl(query, user, raw):
+    """Handle recommend category/watchlist selection."""
+    choice = raw.split(":", 1)[1]
+    mode = state.user_data[user].get("mode", "movie")
+    if choice == "all":
+        watchlist = "all"
+    else:
+        wl_names = list(state.user_data[user]["watchlists"][mode].keys())
+        try:
+            idx = int(choice)
+            watchlist = wl_names[idx]
+        except (ValueError, IndexError):
+            await query.answer("Invalid choice.", show_alert=True)
+            return
+    state._rec_genre_filter[user] = {"watchlist": watchlist, "genres": set()}
+    keyboard = build_genre_picker_keyboard(set(), mode=mode)
+    await query.edit_message_text(
+        "Filter recommendations by genre (or skip for all):",
+        reply_markup=keyboard)
+    await query.answer()
+
+
 def register(app, router):
     app.add_handler(CommandHandler(['recommend', 'r'], RecommendCommand()))
     app.add_handler(CommandHandler(['check', 'c'], CheckCommand()))
@@ -400,3 +443,4 @@ def register(app, router):
     router.add('gf', handle_gf)
     router.add('recgo', handle_recgo)
     router.add('rpick', handle_rpick)
+    router.add('rwl', handle_rwl)

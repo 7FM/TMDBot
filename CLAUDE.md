@@ -22,7 +22,7 @@ There are no tests in this project.
 
 Two YAML files (git-ignored) are required at runtime:
 - `settings.yaml` — Telegram bot token, TMDb API key, allowed user IDs
-- `user_data.yaml` — Per-user state (mode, name, watchlists nested by mode, providers, watched history with ratings nested by mode, region, onboarded flag, `tv_season_counts` for season tracking) plus top-level `shared_watchlists` dict and `_shared_wl_next_id` counter; auto-created if missing
+- `user_data.yaml` — Per-user state (mode, name, watchlists nested by mode, providers, watched history nested by mode with `{rating, category}` entries, region, onboarded flag, `tv_season_counts` for season tracking) plus top-level `shared_watchlists` dict, `_shared_wl_next_id` counter, and `_version` (schema version for migrations); auto-created if missing
 
 ## Architecture
 
@@ -33,8 +33,9 @@ tmdbot/
 ├── __init__.py          # from tmdbot.app import main
 ├── __main__.py          # from tmdbot import main; main()
 ├── config.py            # Settings, TMDb API client init (deferred via init()), regions, genre caches, user_data_initialize()
+├── migration.py         # Versioned user data migrations (CURRENT_VERSION=1, migrate(), _iter_users())
 ├── state.py             # All global state dicts (mutable module-level), save/load user data
-├── helpers.py           # Text escaping, media info extraction, provider logic, watchlist lookups, parse_callback_data, mode converters
+├── helpers.py           # Text escaping, media info extraction, provider logic, watchlist lookups, parse_callback_data, mode converters, get_watched_rating/get_watched_category
 ├── keyboards.py         # All build_*_keyboard() functions, get_main_keyboard()
 ├── messaging.py         # send_back_text, send_movie_message, send_movie_list, progress bar, cleanup helpers, _notify_shared_wl_members
 ├── base.py              # BaseCommand class (auth + onboarding check, delegates to execute())
@@ -45,8 +46,8 @@ tmdbot/
 │   ├── search.py        # SearchCommand + do_search() + smore, det, rdet, exp/col callbacks + default_search_handler
 │   ├── watchlist.py     # ListCommand, AddCommand, TrashAddCommand, RemoveCommand + wl, nwl, wledit, wlback, dwl/dwly/dwln callbacks + fallback handler (pick, back, a, rm, new, sa, srm, w, ws)
 │   ├── shared_wl.py     # nswl, smu, smd, sdwl/sdwly/sdwln, swb, swdet callbacks (no command — all callback-driven from /list)
-│   ├── watched.py       # WatchedCommand, RateCommand + rate/rrate, undo callbacks + w/ws action helpers
-│   ├── discovery.py     # RecommendCommand, CheckCommand, PopularCommand, PickCommand + gf, recgo, rpick callbacks
+│   ├── watched.py       # WatchedCommand, RateCommand + rate/rrate, undo, wcat, ccat callbacks + w/ws action helpers
+│   ├── discovery.py     # RecommendCommand, CheckCommand, PopularCommand, PickCommand + gf, recgo, rpick, rwl callbacks
 │   ├── tv_seasons.py    # NewSeasonsCommand, ViewSeasonsCommand + sdet, supd callbacks + _daily_season_check
 │   ├── info.py          # StatsCommand, TrendingCommand, PersonCommand + do_person_search()
 │   ├── onboarding.py    # StartCommand, ServicesCommand + reg, regp, chreg, sp callbacks + name reply handler
@@ -56,7 +57,8 @@ tmdbot/
 
 **Key layers:**
 
-1. **`config.py`**: TMDb API clients and settings are initialized lazily via `config.init(settings_file, user_data_file)` called from `main()`. No import-time side effects.
+1. **`config.py`**: TMDb API clients and settings are initialized lazily via `config.init(settings_file, user_data_file)` called from `main()`. No import-time side effects. Calls `migration.migrate()` before `user_data_initialize()`.
+1b. **`migration.py`**: Versioned data migrations. `CURRENT_VERSION` tracks the schema version. `migrate()` runs all pending `_migrate_to_vN` functions over all user entries (integer keys) and saves. Version stored as `_version` in `user_data.yaml`.
 2. **`state.py`**: All mutable global state (pending dicts, caches, user data) as module-level variables. Mutations visible across all importers. `next_chunk_id()` helper for the integer counter.
 3. **`helpers.py`**: Pure utility functions — text escaping (`esc()`), media info extraction, provider logic, watchlist lookup helpers, callback data parsing, mode converters.
 4. **`keyboards.py`**: All `build_*_keyboard()` functions and `get_main_keyboard()`.
@@ -101,7 +103,8 @@ Adding a new feature = adding one handler file + one entry in `_HANDLER_MODULES`
 **Key patterns (unchanged from before refactoring):**
 
 - User state is `state.user_data` dict persisted to YAML via `state.save_user_data()`
-- `user_data_initialize()` in `config.py` handles data migrations
+- `user_data_initialize()` in `config.py` handles new user creation; `migration.py` handles versioned schema migrations
+- Watched entries are dicts: `{"rating": int|None, "category": str|None}`. Use `get_watched_rating(entry)` and `get_watched_category(entry)` from `helpers.py` to access fields
 - Text output uses `send_back_text()` which escapes for MarkdownV2, splits long messages, and always restores the persistent keyboard
 - Movie search results use `send_movie_message()` which attaches inline keyboard buttons (Add/Remove/Watched); search result message IDs are tracked in `state._search_results` for cleanup after user action
 - List-based views use `send_movie_list(bot, chat_id, ...)` which produces chunked itemized lists with expand/collapse buttons
@@ -110,8 +113,10 @@ Adding a new feature = adding one handler file + one entry in `_HANDLER_MODULES`
 - `/popular` uses `ThreadPoolExecutor` for parallel provider lookups with a simple status message
 - All provider lookups go through `get_api(mode).details(id, append_to_response="watch/providers")` + `_parse_providers_from_details`
 - Search results show 5 at a time with a "Show more" button; remaining results are stored in `state._search_more` per user
-- Marking an item as watched sends a confirmation with the main keyboard, then a separate "Undo?" message with an inline button
-- For TV shows, the watched flow adds a season picker step: `[Watched]` → season picker (`ws:` callback) → rating keyboard → save
+- Marking an item as watched sends a confirmation with the main keyboard, then a separate "Undo?" message with an inline button. Each watched entry stores `{"rating": int|None, "category": str|None}` where category is the watchlist it was watched from
+- When watching from search (not in any watchlist), a category picker is shown first so the user can tag it. When watching from a watchlist, the category is set automatically
+- For TV shows, the watched flow adds a season picker step: `[Watched]` → (category picker if from search) → season picker (`ws:` callback) → rating keyboard → save
+- `/recommend` without args shows a category picker (watchlists + "All"). Recommendations seed from the chosen watchlist's items plus highly-rated watched items with matching category. This prevents e.g. trash movies from polluting normal recommendations
 - `/newseasons` (`/ns`) checks all watched TV shows for new seasons. A daily `JobQueue` job (`_daily_season_check`) runs at 9:00 AM
 
 **Inline keyboard & callback system:**
@@ -128,6 +133,9 @@ All button presses route through `Router.__call__()` using colon-delimited callb
 - `rpick:<watchlist|*>` — pick another random available item (`*` = all watchlists, uses current mode)
 - `smore` — show next 5 search results (uses current mode)
 - `gf:<genre_id>` — toggle genre in recommendation filter; `recgo:skip` / `recgo:filter` — launch recommendations (all genres or filtered)
+- `rwl:<index|all>` — select watchlist category for recommendations (index into watchlist names, or "all")
+- `wcat:<index|s>` — select category when marking watched from search (index into watchlist names, `s` = skip); also used for change-category flow
+- `ccat:type:id` — initiate change category for an already-watched item (shown in `rdet` detail view)
 - `ws:type:id:season` — season picked in TV watched flow (then shows rating keyboard)
 - `sdet:tv:id` — show season detail from `/seasons` list (shows season picker to update)
 - `supd:tv:id:season` — update watched season from `/seasons` view
@@ -142,7 +150,7 @@ All button presses route through `Router.__call__()` using colon-delimited callb
 
 **Shared watchlists:** Stored in a top-level `shared_watchlists` dict in `user_data.yaml` (keyed by numeric ID, not nested under users). Each entry has `name`, `owner` (user ID), `members` (list of user IDs), and `items` (nested by mode like personal watchlists). `_shared_wl_next_id` tracks the next available ID. Helper functions: `_get_shared_wl()`, `_next_shared_wl_id()`, `_user_shared_watchlists()`, `_get_user_display_name()`, `is_in_any_shared_watchlist()`, `find_all_shared_watchlists()`. Creation flow: name (ForceReply) → member selection (toggle keyboard like streaming services) → create. Any member can add/remove items; only owner can delete. Marking watched is personal (item stays in shared list). Notifications via `_notify_shared_wl_members()` are sent when items are added/removed/watched. When an item is removed, members who haven't watched it get a "Watched" button. `/list` shows both personal and shared (prefixed with 👥) watchlists. The watchlist picker when adding items also includes shared watchlists. `/setname` lets users set/change their display name.
 
-**Multi-step interactions** use `ForceReply` prompts with pending state dicts (`state._pending_new_watchlist` stores `(movie_id, mode)`, `state._pending_search`, `state._pending_person`, `state._pending_name`, `state._pending_shared_wl_name`), handled by `reply_handler()` in `reply_handler.py`. Plain text input (non-reply) defaults to search via `default_search_handler()`. `/fix` restores the persistent keyboard if ForceReply causes it to disappear.
+**Multi-step interactions** use `ForceReply` prompts with pending state dicts (`state._pending_new_watchlist` stores `(movie_id, mode)`, `state._pending_search`, `state._pending_person`, `state._pending_name`, `state._pending_shared_wl_name`, `state._pending_watched_category`), handled by `reply_handler()` in `reply_handler.py`. `_pending_watched_category` is used for both the watched-from-search category picker and the change-category flow (distinguished by `"change_only"` flag). Plain text input (non-reply) defaults to search via `default_search_handler()`. `/fix` restores the persistent keyboard if ForceReply causes it to disappear.
 
 **MarkdownV2 escaping:** `esc()` uses regex to preserve `[text](url)` links (escaping text inside brackets, escaping `\` and `)` in URLs) and `` `code` `` spans, while `_esc_plain()` escapes all reserved characters in plain text. tmdbv3api's `AsObj` wrapper raises `AttributeError` instead of `KeyError` for missing keys — catch both in try/except blocks.
 

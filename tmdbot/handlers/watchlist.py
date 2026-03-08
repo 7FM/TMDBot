@@ -10,6 +10,7 @@ from tmdbot.base import BaseCommand
 from tmdbot.helpers import (
     get_user_id, esc, extract_movie_info, is_valid_media_id,
     is_in_any_watchlist, find_all_watchlists,
+    get_watched_rating,
     _mode_to_type, _type_to_mode,
     _get_shared_wl, _user_shared_watchlists,
     _get_user_display_name, find_all_shared_watchlists,
@@ -98,7 +99,7 @@ async def _add_to_watchlist_helper(watchlist, media_id, user, update):
         await send_back_text(update, f'Already in your "{already_in}" watchlist.')
     else:
         if media_id in state.user_data[user]["watched"][mode]:
-            prev_rating = state.user_data[user]["watched"][mode][media_id]
+            prev_rating = get_watched_rating(state.user_data[user]["watched"][mode][media_id])
             if isinstance(prev_rating, (int, float)) and prev_rating > 0:
                 await send_back_text(update, f"Warning: you already watched this (rated {prev_rating}/10)!")
             else:
@@ -229,7 +230,7 @@ async def _handle_fallback(query, user, raw):
             await query.answer(f'Already in "{already_in}" watchlist.', show_alert=True)
         else:
             if movie_id in state.user_data[user]["watched"][cb_mode]:
-                prev_rating = state.user_data[user]["watched"][cb_mode][movie_id]
+                prev_rating = get_watched_rating(state.user_data[user]["watched"][cb_mode][movie_id])
                 if isinstance(prev_rating, (int, float)) and prev_rating > 0:
                     await query.answer(f"Warning: you already watched this (rated {prev_rating}/10)!", show_alert=True)
                 else:
@@ -307,7 +308,7 @@ async def _handle_sa(query, user, movie_id, watchlist, cb_mode, media_type):
         await query.answer(f'Already in "{sw["name"]}".', show_alert=True)
         return
     if movie_id in state.user_data[user]["watched"][cb_mode]:
-        prev_rating = state.user_data[user]["watched"][cb_mode][movie_id]
+        prev_rating = get_watched_rating(state.user_data[user]["watched"][cb_mode][movie_id])
         if isinstance(prev_rating, (int, float)) and prev_rating > 0:
             await query.answer(f"Warning: you already watched this (rated {prev_rating}/10)!", show_alert=True)
         else:

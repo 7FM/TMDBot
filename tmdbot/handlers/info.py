@@ -8,6 +8,7 @@ from tmdbot.config import get_api, trending, person_api, search
 from tmdbot.base import BaseCommand
 from tmdbot.helpers import (
     extract_movie_info, extract_genre,
+    get_watched_rating,
     _mode_to_type,
 )
 from tmdbot.messaging import (
@@ -26,7 +27,8 @@ class StatsCommand(BaseCommand):
             await send_back_text(update, f"You haven't watched any {label} yet.")
             return
         ratings = []
-        for mid, rating in watched.items():
+        for mid, entry in watched.items():
+            rating = get_watched_rating(entry)
             if isinstance(rating, (int, float)) and rating > 0:
                 ratings.append(rating)
         rated = len(ratings)

@@ -161,6 +161,28 @@ def build_season_picker_keyboard(media_id: int, media_type: str, num_seasons: in
     return InlineKeyboardMarkup(rows)
 
 
+def build_category_picker_keyboard(user, mode=None):
+    if mode is None:
+        mode = state.user_data[user].get("mode", "movie")
+    wl_names = list(state.user_data[user]["watchlists"][mode].keys())
+    rows = []
+    for i, wn in enumerate(wl_names):
+        rows.append([InlineKeyboardButton(wn, callback_data=f"wcat:{i}")])
+    rows.append([InlineKeyboardButton("Skip", callback_data="wcat:s")])
+    return InlineKeyboardMarkup(rows)
+
+
+def build_recommend_category_keyboard(user, mode=None):
+    if mode is None:
+        mode = state.user_data[user].get("mode", "movie")
+    wl_names = list(state.user_data[user]["watchlists"][mode].keys())
+    rows = []
+    for i, wn in enumerate(wl_names):
+        rows.append([InlineKeyboardButton(wn, callback_data=f"rwl:{i}")])
+    rows.append([InlineKeyboardButton("All", callback_data="rwl:all")])
+    return InlineKeyboardMarkup(rows)
+
+
 def build_region_keyboard(page: int = 0) -> InlineKeyboardMarkup:
     start = page * REGIONS_PER_PAGE
     end = min(start + REGIONS_PER_PAGE, len(REGIONS))

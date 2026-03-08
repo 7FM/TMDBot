@@ -37,6 +37,7 @@ _pending_shared_wl_name = {}  # user_id -> {"media_id": int|None, "mode": str}
 # user_id -> {"name": str, "media_id": int|None, "mode": str, "members": [user_ids]}
 _pending_shared_wl_members = {}
 _pending_season = {}  # user_id -> {"mid": int, "total": int, "media_type": str}
+_pending_watched_category = {}  # user_id -> {"mid": int, "media_type": str, "mode": str}
 
 # Chunk expand/collapse state
 _chunk_movies = {}

@@ -9,6 +9,7 @@ from tmdbot.helpers import (
     esc, extract_movie_info, is_valid_media_id,
     is_in_any_watchlist, find_all_watchlists,
     find_all_shared_watchlists,
+    get_watched_rating, get_watched_category,
     _mode_to_type, _type_to_mode,
     _get_shared_wl, _get_user_display_name,
     _count_released_seasons,
@@ -16,6 +17,7 @@ from tmdbot.helpers import (
 from tmdbot.keyboards import (
     get_main_keyboard, build_media_keyboard,
     build_rating_keyboard, build_season_picker_keyboard,
+    build_category_picker_keyboard,
 )
 from tmdbot.messaging import (
     send_back_text, send_movie_list,
@@ -78,18 +80,21 @@ async def _send_rate_list(bot, chat_id, user):
     mt = _mode_to_type(mode)
     api = get_api(mode)
     watched = state.user_data[user]["watched"][mode]
-    unrated = [(mid, r) for mid, r in watched.items() if r is None]
+    unrated = [(mid, entry) for mid, entry in watched.items() if get_watched_rating(entry) is None]
     rated = sorted(
-        [(mid, r) for mid, r in watched.items() if r is not None],
-        key=lambda x: -x[1])
+        [(mid, entry) for mid, entry in watched.items() if get_watched_rating(entry) is not None],
+        key=lambda x: -get_watched_rating(x[1]))
     movies_info = []
-    for mid, r in unrated + rated:
+    for mid, entry in unrated + rated:
+        r = get_watched_rating(entry)
+        cat = get_watched_category(entry)
         details = api.details(mid)
         _, _, desc, _ = extract_movie_info(
             details, skip_trailer=True, mode=mode)
         title = details.get("title") or details.get("name") or "Unknown"
         rating_str = "unrated" if r is None else f"Your rating: {r}/10"
-        movies_info.append((mid, title, f"{desc}\n{rating_str}"))
+        cat_str = f" [{cat}]" if cat else ""
+        movies_info.append((mid, title, f"{desc}\n{rating_str}{cat_str}"))
     n_unrated = len(unrated)
     n_rated = len(rated)
     label = "movie" if mode == "movie" else "show"
@@ -124,7 +129,14 @@ async def handle_rate(query, user, raw):
                                  "prev_rating": prev_rating, "prev_season_data": prev_season_data, "mode": rate_mode}
     for wn in prev_wls:
         state.user_data[user]["watchlists"][rate_mode][wn].remove(mid)
-    state.user_data[user]["watched"][rate_mode][mid] = rating
+    # Determine category
+    if prev_wls:
+        category = prev_wls[0]
+    elif user in state._pending_watched_category:
+        category = state._pending_watched_category.pop(user).get("category")
+    else:
+        category = None
+    state.user_data[user]["watched"][rate_mode][mid] = {"rating": rating, "category": category}
     # Save season tracking data for TV shows
     if rate_mode == "tv" and user in state._pending_season and state._pending_season[user]["mid"] == mid:
         pending = state._pending_season.pop(user)
@@ -228,6 +240,20 @@ async def handle_undo(query, user, raw):
 
 async def handle_w_action(query, user, movie_id, media_type, cb_mode):
     """Handle 'w' (watched) action from fallback dispatcher."""
+    in_watchlist = is_in_any_watchlist(movie_id, user, mode=cb_mode)
+    if not in_watchlist:
+        # Item not in any watchlist — ask for category first
+        state._pending_watched_category[user] = {
+            "mid": movie_id, "media_type": media_type, "mode": cb_mode}
+        cat_kb = build_category_picker_keyboard(user, mode=cb_mode)
+        await query.edit_message_reply_markup(reply_markup=cat_kb)
+        await query.answer("Which category?")
+        return
+    await _continue_watched_flow(query, user, movie_id, media_type, cb_mode)
+
+
+async def _continue_watched_flow(query, user, movie_id, media_type, cb_mode):
+    """Show season picker (TV) or rating keyboard (movie) to continue the watched flow."""
     if media_type == "tv":
         try:
             details = tv.details(movie_id)
@@ -241,7 +267,8 @@ async def handle_w_action(query, user, movie_id, media_type, cb_mode):
         await query.edit_message_reply_markup(reply_markup=season_kb)
         await query.answer("Which season did you watch up to?")
     else:
-        if movie_id in state.user_data[user]["watched"][cb_mode] and state.user_data[user]["watched"][cb_mode][movie_id] is not None:
+        entry = state.user_data[user]["watched"][cb_mode].get(movie_id)
+        if entry is not None and get_watched_rating(entry) is not None:
             await query.answer("Already marked as watched.", show_alert=True)
         else:
             rating_kb = build_rating_keyboard(
@@ -268,9 +295,79 @@ async def handle_ws_action(query, user, raw, movie_id, media_type):
     await query.answer("Rate this:")
 
 
+async def handle_wcat(query, user, raw):
+    """Handle category selection from category picker (both watched and change-category flows)."""
+    if user not in state._pending_watched_category:
+        await query.answer("Session expired.", show_alert=True)
+        return
+    pending = state._pending_watched_category[user]
+    choice = raw.split(":", 1)[1]
+    mode = pending["mode"]
+    wl_names = list(state.user_data[user]["watchlists"][mode].keys())
+    if choice == "s":
+        new_cat = None
+    else:
+        try:
+            idx = int(choice)
+            new_cat = wl_names[idx]
+        except (ValueError, IndexError):
+            await query.answer("Invalid choice.", show_alert=True)
+            return
+    # Change-category flow: just update the category on existing entry
+    if pending.get("change_only"):
+        state._pending_watched_category.pop(user)
+        mid = pending["mid"]
+        entry = state.user_data[user]["watched"][mode].get(mid)
+        if isinstance(entry, dict):
+            entry["category"] = new_cat
+        else:
+            state.user_data[user]["watched"][mode][mid] = {"rating": entry, "category": new_cat}
+        state.save_user_data()
+        cat_label = new_cat or "none"
+        await query.answer(f"Category changed to {cat_label}.")
+        if user in state._rate_list_messages:
+            bot = query.get_bot()
+            chat_id = query.message.chat_id
+            await _cleanup_rate_list(bot, user)
+            msgs = await _send_rate_list(bot, chat_id, user)
+            state._rate_list_messages[user] = (chat_id, [m.message_id for m in msgs])
+        else:
+            try:
+                await query.message.delete()
+            except Exception:
+                await query.edit_message_reply_markup(reply_markup=None)
+        return
+    # Normal watched flow: store category and continue to rating/season
+    pending["category"] = new_cat
+    await _continue_watched_flow(
+        query, user, pending["mid"], pending["media_type"], mode)
+
+
+async def handle_ccat(query, user, raw):
+    """Handle change category for an already-watched item."""
+    parts = raw.split(":")
+    if len(parts) < 3:
+        await query.answer("Invalid action.", show_alert=True)
+        return
+    mt = parts[1]
+    mid = int(parts[2])
+    cb_mode = _type_to_mode(mt)
+    watched = state.user_data[user]["watched"][cb_mode]
+    if mid not in watched:
+        await query.answer("Item not in watched list.", show_alert=True)
+        return
+    state._pending_watched_category[user] = {
+        "mid": mid, "media_type": mt, "mode": cb_mode, "change_only": True}
+    cat_kb = build_category_picker_keyboard(user, mode=cb_mode)
+    await query.edit_message_reply_markup(reply_markup=cat_kb)
+    await query.answer("Choose new category:")
+
+
 def register(app, router):
     app.add_handler(CommandHandler(['watched', 'w'], WatchedCommand()))
     app.add_handler(CommandHandler('rate', RateCommand()))
     router.add('rate', handle_rate)
     router.add('rrate', handle_rate)
     router.add('undo', handle_undo)
+    router.add('wcat', handle_wcat)
+    router.add('ccat', handle_ccat)

@@ -199,6 +199,20 @@ def sort_by_rating(movie_list):
     return sorted(movie_list, key=lambda x: x[0], reverse=True)
 
 
+def get_watched_rating(entry):
+    """Extract rating from a watched entry (dict or legacy int/None)."""
+    if isinstance(entry, dict):
+        return entry.get("rating")
+    return entry
+
+
+def get_watched_category(entry):
+    """Extract category from a watched entry."""
+    if isinstance(entry, dict):
+        return entry.get("category")
+    return None
+
+
 def is_in_any_watchlist(media_id, user, mode=None):
     if mode is None:
         mode = state.user_data[user].get("mode", "movie")

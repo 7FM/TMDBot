@@ -94,34 +94,11 @@ def user_data_initialize():
             ud[user]["mode"] = "movie"
             ud[user]["tv_season_counts"] = {}
             ud[user]["name"] = ""
-        else:
-            u = ud[user]
-            # Migrate mode
-            if "mode" not in u:
-                u["mode"] = "movie"
-            # Migrate flat watchlists to nested
-            if "watchlists" in u and "movie" not in u["watchlists"]:
-                old_wl = u["watchlists"]
-                u["watchlists"] = {
-                    "movie": old_wl,
-                    "tv": {"normal": [], "trash": []},
-                }
-            # Migrate flat watched to nested
-            if "watched" in u and "movie" not in u["watched"]:
-                old_watched = u["watched"]
-                u["watched"] = {"movie": old_watched, "tv": {}}
-            # Migrate tv_season_counts
-            if "tv_season_counts" not in u:
-                u["tv_season_counts"] = {}
     # Initialize shared watchlist storage (top-level)
     if "shared_watchlists" not in ud:
         ud["shared_watchlists"] = {}
     if "_shared_wl_next_id" not in ud:
         ud["_shared_wl_next_id"] = 1
-    # Normalize shared watchlist keys to integers (YAML may stringify them)
-    sw = ud["shared_watchlists"]
-    if sw and any(isinstance(k, str) for k in sw):
-        ud["shared_watchlists"] = {int(k): v for k, v in sw.items()}
     state.save_user_data()
 
 
@@ -133,6 +110,8 @@ def init(settings_file, user_data_file):
     tmdb.api_key = settings["tmdb_api_key"]
 
     state.init(user_data_file)
+    from tmdbot.migration import migrate
+    migrate()
     user_data_initialize()
 
     movie_genre_dict = get_movie_genres()

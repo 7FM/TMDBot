@@ -128,8 +128,11 @@ async def handle_det(query, user, raw):
     action = parts[0]
     if action == "rdet":
         from tmdbot.keyboards import build_rating_keyboard
-        keyboard = build_rating_keyboard(
+        rating_kb = build_rating_keyboard(
             mid, media_type=det_mt, action_prefix="rrate")
+        rows = list(rating_kb.inline_keyboard) + [
+            [InlineKeyboardButton("Change category", callback_data=f"ccat:{det_mt}:{mid}")]]
+        keyboard = InlineKeyboardMarkup(rows)
     else:
         keyboard = build_media_keyboard(mid, user, mode=det_mode)
     await query.answer()

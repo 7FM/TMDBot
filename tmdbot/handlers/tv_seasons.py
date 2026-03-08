@@ -11,6 +11,7 @@ from tmdbot.config import settings, tv
 from tmdbot.base import BaseCommand
 from tmdbot.helpers import (
     esc, extract_movie_info,
+    get_watched_rating,
     _count_released_seasons,
 )
 from tmdbot.keyboards import build_season_picker_keyboard
@@ -65,7 +66,7 @@ class ViewSeasonsCommand(BaseCommand):
             return
         stored = state.user_data[user].get("tv_season_counts", {})
         movies_info = []
-        for mid, rating in watched_tv.items():
+        for mid, entry in watched_tv.items():
             try:
                 details = tv.details(mid)
             except Exception:
@@ -81,6 +82,7 @@ class ViewSeasonsCommand(BaseCommand):
             else:
                 total_s = _count_released_seasons(details) or "?"
                 season_str = f"Watched: ?/{total_s}"
+            rating = get_watched_rating(entry)
             rating_str = f"{rating}/10" if rating else "unrated"
             movies_info.append(
                 (mid, title, f"{desc}\n{season_str} - {rating_str}"))
