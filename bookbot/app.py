@@ -11,6 +11,7 @@ from bookbot import config
 from botlib.router import Router
 from botlib.messaging import register_main_keyboard_fn
 from botlib.keyboards import configure_labels
+from botlib.hooks import register_metadata_fetcher
 from bookbot.reply_handler import reply_handler
 from bookbot.keyboards import get_main_keyboard
 from bookbot.handlers import (
@@ -24,6 +25,51 @@ _HANDLER_MODULES = [
     onboarding, search, watchlist, shared_wl,
     read, discovery, info, misc,
 ]
+
+
+def _fetch_book_metadata(media_id, mode):
+    """Fetch Open Library metadata for the on_add hook."""
+    from bookbot.config import ol_work, _rate_limited_get, OL_BASE
+    data = ol_work(media_id)
+    title = data.get("title", "")
+
+    # Get author names from author references
+    authors = []
+    for a in data.get("authors", []):
+        author_key = a.get("author", {}).get("key", "")
+        if author_key:
+            try:
+                ad = _rate_limited_get(
+                    f"{OL_BASE}{author_key}.json").json()
+                authors.append(ad.get("name", ""))
+            except Exception:
+                pass
+    author = ", ".join(authors)
+
+    # Get ISBN from editions
+    isbn = ""
+    try:
+        editions = _rate_limited_get(
+            f"{OL_BASE}/works/OL{media_id}W/editions.json",
+            params={"limit": 5}).json()
+        for ed in editions.get("entries", []):
+            isbn_13 = ed.get("isbn_13", [])
+            if isbn_13:
+                isbn = isbn_13[0]
+                break
+            isbn_10 = ed.get("isbn_10", [])
+            if isbn_10:
+                isbn = isbn_10[0]
+                break
+    except Exception:
+        pass
+
+    return {
+        "TITLE": title,
+        "AUTHOR": author,
+        "ISBN": isbn,
+        "MEDIA_TYPE": "book",
+    }
 
 
 async def post_init(application):
@@ -67,6 +113,7 @@ def main():
     # Register domain-specific overrides with botlib
     register_main_keyboard_fn(get_main_keyboard)
     configure_labels({"watched": "Read"})
+    register_metadata_fetcher(_fetch_book_metadata)
 
     application = Application.builder().token(
         config.settings["telegram_token"]).post_init(post_init).build()

@@ -12,6 +12,7 @@ from telegram.ext import (
 from tmdbot import config
 from botlib.router import Router
 from botlib.messaging import register_main_keyboard_fn
+from botlib.hooks import register_metadata_fetcher
 from tmdbot.reply_handler import reply_handler
 from tmdbot.keyboards import _MODE_SWITCH_TV, _MODE_SWITCH_MOVIE, get_main_keyboard
 from tmdbot.handlers import (
@@ -25,6 +26,23 @@ _HANDLER_MODULES = [
     onboarding, search, watchlist, shared_wl,
     watched, discovery, tv_seasons, info, misc,
 ]
+
+
+def _fetch_tmdb_metadata(media_id, mode):
+    """Fetch TMDb metadata for the on_add hook."""
+    from tmdbot.config import get_api
+    api = get_api(mode)
+    details = api.details(media_id)
+    title = details.get("title") or details.get("name") or ""
+    year = ""
+    rd = details.get("release_date") or details.get("first_air_date") or ""
+    if rd:
+        year = rd[:4]
+    return {
+        "TITLE": title,
+        "YEAR": year,
+        "MEDIA_TYPE": "movie" if mode == "movie" else "tv",
+    }
 
 
 async def post_init(application):
@@ -82,8 +100,9 @@ def main():
 
     config.init(settings_file, user_data_file)
 
-    # Register domain-specific main keyboard with botlib
+    # Register domain-specific callbacks with botlib
     register_main_keyboard_fn(get_main_keyboard)
+    register_metadata_fetcher(_fetch_tmdb_metadata)
 
     application = Application.builder().token(
         config.settings["telegram_token"]).post_init(post_init).build()

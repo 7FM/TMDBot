@@ -23,6 +23,7 @@ from botlib.messaging import (
 from bookbot.keyboards import get_main_keyboard
 from bookbot.helpers import extract_book_info, extract_book_detail
 from bookbot.config import ol_work
+from botlib.hooks import run_on_add
 
 logger = logging.getLogger(__name__)
 
@@ -157,6 +158,7 @@ async def handle_fallback(query, user, raw):
                     reply_markup=get_main_keyboard(user))
             wl[watchlist].append(media_id)
             state.save_user_data()
+            run_on_add(media_id, mode, user, watchlist)
             await query.message.reply_text(
                 f'Added to "{watchlist}".',
                 reply_markup=get_main_keyboard(user))
@@ -211,6 +213,7 @@ async def handle_fallback(query, user, raw):
                 sw.setdefault("items", {})[mode] = []
             sw["items"][mode].append(media_id)
             state.save_user_data()
+            run_on_add(media_id, mode, user, sw["name"])
             display_name = _get_user_display_name(user)
             await query.message.reply_text(
                 f'Added to shared list "{sw["name"]}".',

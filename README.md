@@ -155,6 +155,28 @@ python -m tmdbot settings.yaml user_data.yaml
 python -m bookbot bookbot_settings.yaml bookbot_user_data.yaml
 ```
 
+### Hooks
+
+Both bots support an optional `on_add_script` that runs whenever an item is added to a watchlist (personal or shared). Add it to your settings:
+
+```yaml
+on_add_script: "/path/to/your/script.sh"
+```
+
+The script receives metadata via environment variables:
+
+| Variable | Bots | Description |
+|----------|------|-------------|
+| `MEDIA_ID` | both | TMDb ID or Open Library work ID |
+| `MODE` | both | `movie`, `tv`, or `book` |
+| `USER_ID` | both | Telegram user ID |
+| `WATCHLIST` | both | Watchlist name |
+| `MEDIA_TYPE` | both | `movie`, `tv`, or `book` |
+| `TITLE` | both | Title |
+| `YEAR` | TMDBot | Release year |
+| `AUTHOR` | BookBot | Author name(s) |
+| `ISBN` | BookBot | ISBN-13 (or ISBN-10 fallback) |
+
 ## Architecture
 
 ```

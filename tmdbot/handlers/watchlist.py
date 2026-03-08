@@ -25,6 +25,7 @@ from tmdbot.messaging import (
     _cleanup_search_results, _is_search_message,
     _notify_shared_wl_members,
 )
+from botlib.hooks import run_on_add
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +108,7 @@ async def _add_to_watchlist_helper(watchlist, media_id, user, update):
                 await send_back_text(update, "Warning: you have already watched this!")
         state.user_data[user]["watchlists"][mode][watchlist].append(media_id)
         state.save_user_data()
+        run_on_add(media_id, mode, user, watchlist)
         await send_back_text(update, 'Added to watchlist.')
 
 
@@ -242,6 +244,7 @@ async def _handle_fallback(query, user, raw):
             state.user_data[user]["watchlists"][cb_mode][watchlist].append(
                 movie_id)
             state.save_user_data()
+            run_on_add(movie_id, cb_mode, user, watchlist)
             if _is_search_message(user, query.message.message_id):
                 await _cleanup_search_results(query.get_bot(), user)
                 await query.get_bot().send_message(
@@ -321,6 +324,7 @@ async def _handle_sa(query, user, movie_id, watchlist, cb_mode, media_type):
         await query.answer(f'Added to "{sw["name"]}".')
     sw["items"].setdefault(cb_mode, []).append(movie_id)
     state.save_user_data()
+    run_on_add(movie_id, cb_mode, user, sw["name"])
     bot = query.get_bot()
     if _is_search_message(user, query.message.message_id):
         await _cleanup_search_results(bot, user)
