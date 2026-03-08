@@ -96,7 +96,7 @@ def user_data_initialize():
             ud[user] = dict()
             ud[user]["watched"] = {"book": {}}
             ud[user]["watchlists"] = {
-                "book": {"to-read": [], "backlog": []},
+                "book": {"to-read": []},
             }
             ud[user]["onboarded"] = False
             ud[user]["mode"] = "book"
