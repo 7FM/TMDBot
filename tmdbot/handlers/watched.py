@@ -1,3 +1,6 @@
+import concurrent.futures
+import multiprocessing
+
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
 from telegram.ext import CommandHandler
@@ -23,6 +26,7 @@ from tmdbot.messaging import (
     send_back_text, send_movie_list,
     _cleanup_search_results, _cleanup_rate_list,
     _is_search_message, _notify_shared_wl_members,
+    _with_progress_bar,
 )
 
 
@@ -84,11 +88,33 @@ async def _send_rate_list(bot, chat_id, user):
     rated = sorted(
         [(mid, entry) for mid, entry in watched.items() if get_watched_rating(entry) is not None],
         key=lambda x: -get_watched_rating(x[1]))
+    ordered = unrated + rated
+    total = len(ordered)
+
+    def fetch_details(tick):
+        num_threads = min(multiprocessing.cpu_count(), 8)
+        results = {}
+        with concurrent.futures.ThreadPoolExecutor(max_workers=num_threads) as executor:
+            futures = {executor.submit(api.details, mid): mid for mid, _ in ordered}
+            for future in concurrent.futures.as_completed(futures):
+                mid = futures[future]
+                try:
+                    results[mid] = future.result()
+                except Exception:
+                    results[mid] = None
+                tick()
+        return results
+
+    details_map = await _with_progress_bar(
+        bot, chat_id, "Loading watched list...", total, fetch_details)
+
     movies_info = []
-    for mid, entry in unrated + rated:
+    for mid, entry in ordered:
         r = get_watched_rating(entry)
         cat = get_watched_category(entry)
-        details = api.details(mid)
+        details = details_map.get(mid)
+        if details is None:
+            continue
         _, _, desc, _ = extract_movie_info(
             details, skip_trailer=True, mode=mode)
         title = details.get("title") or details.get("name") or "Unknown"
@@ -135,7 +161,8 @@ async def handle_rate(query, user, raw):
     elif user in state._pending_watched_category:
         category = state._pending_watched_category.pop(user).get("category")
     else:
-        category = None
+        # Preserve existing category when re-rating
+        category = get_watched_category(prev_rating) if prev_rating != "absent" else None
     state.user_data[user]["watched"][rate_mode][mid] = {"rating": rating, "category": category}
     # Save season tracking data for TV shows
     if rate_mode == "tv" and user in state._pending_season and state._pending_season[user]["mid"] == mid:
