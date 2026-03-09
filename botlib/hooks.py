@@ -1,5 +1,6 @@
 """Run external scripts on bot events (e.g., adding to a watchlist)."""
 
+import asyncio
 import logging
 import os
 import subprocess
@@ -21,7 +22,34 @@ def register_metadata_fetcher(fn):
     _fetch_metadata = fn
 
 
-def run_on_add(media_id, mode, user, watchlist_name):
+async def _run_hook(script, env, bot, chat_id):
+    """Run the hook script, capture output, and send result to user."""
+    try:
+        proc = await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: subprocess.run(
+                script, shell=True, env=env,
+                capture_output=True, text=True, timeout=600,
+            ),
+        )
+        output = (proc.stdout or "").strip()
+        errors = (proc.stderr or "").strip()
+        lines = []
+        if output:
+            lines.append(output)
+        if errors:
+            lines.append(errors)
+        if proc.returncode != 0 and not lines:
+            lines.append(f"Hook exited with code {proc.returncode}.")
+        if lines:
+            await bot.send_message(chat_id, "\n".join(lines))
+    except subprocess.TimeoutExpired:
+        await bot.send_message(chat_id, "Hook timed out.")
+    except Exception:
+        logger.error("Hook execution failed", exc_info=True)
+
+
+def run_on_add(media_id, mode, user, watchlist_name, bot=None, chat_id=None):
     """Run the on_add_script if configured."""
     script = settings.get("on_add_script")
     if not script:
@@ -43,10 +71,13 @@ def run_on_add(media_id, mode, user, watchlist_name):
         except Exception:
             logger.warning("Failed to fetch metadata for hook", exc_info=True)
 
-    try:
-        subprocess.Popen(
-            script, shell=True, env=env,
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
-    except Exception:
-        logger.error("Failed to run on_add_script", exc_info=True)
+    if bot and chat_id:
+        asyncio.create_task(_run_hook(script, env, bot, chat_id))
+    else:
+        try:
+            subprocess.Popen(
+                script, shell=True, env=env,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+        except Exception:
+            logger.error("Failed to run on_add_script", exc_info=True)

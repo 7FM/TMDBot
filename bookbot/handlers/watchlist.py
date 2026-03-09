@@ -158,7 +158,7 @@ async def handle_fallback(query, user, raw):
                     reply_markup=get_main_keyboard(user))
             wl[watchlist].append(media_id)
             state.save_user_data()
-            run_on_add(media_id, mode, user, watchlist)
+            run_on_add(media_id, mode, user, watchlist, bot, chat_id)
             await query.message.reply_text(
                 f'Added to "{watchlist}".',
                 reply_markup=get_main_keyboard(user))
@@ -213,7 +213,7 @@ async def handle_fallback(query, user, raw):
                 sw.setdefault("items", {})[mode] = []
             sw["items"][mode].append(media_id)
             state.save_user_data()
-            run_on_add(media_id, mode, user, sw["name"])
+            run_on_add(media_id, mode, user, sw["name"], bot, chat_id)
             display_name = _get_user_display_name(user)
             await query.message.reply_text(
                 f'Added to shared list "{sw["name"]}".',

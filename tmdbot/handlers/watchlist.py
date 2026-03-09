@@ -108,7 +108,8 @@ async def _add_to_watchlist_helper(watchlist, media_id, user, update):
                 await send_back_text(update, "Warning: you have already watched this!")
         state.user_data[user]["watchlists"][mode][watchlist].append(media_id)
         state.save_user_data()
-        run_on_add(media_id, mode, user, watchlist)
+        bot = update.message.get_bot()
+        run_on_add(media_id, mode, user, watchlist, bot, update.message.chat_id)
         await send_back_text(update, 'Added to watchlist.')
 
 
@@ -244,7 +245,8 @@ async def _handle_fallback(query, user, raw):
             state.user_data[user]["watchlists"][cb_mode][watchlist].append(
                 movie_id)
             state.save_user_data()
-            run_on_add(movie_id, cb_mode, user, watchlist)
+            run_on_add(movie_id, cb_mode, user, watchlist,
+                       query.get_bot(), query.message.chat_id)
             if _is_search_message(user, query.message.message_id):
                 await _cleanup_search_results(query.get_bot(), user)
                 await query.get_bot().send_message(
@@ -324,8 +326,9 @@ async def _handle_sa(query, user, movie_id, watchlist, cb_mode, media_type):
         await query.answer(f'Added to "{sw["name"]}".')
     sw["items"].setdefault(cb_mode, []).append(movie_id)
     state.save_user_data()
-    run_on_add(movie_id, cb_mode, user, sw["name"])
     bot = query.get_bot()
+    run_on_add(movie_id, cb_mode, user, sw["name"],
+               bot, query.message.chat_id)
     if _is_search_message(user, query.message.message_id):
         await _cleanup_search_results(bot, user)
         await bot.send_message(

@@ -88,7 +88,8 @@ async def handle_smd(query, user, raw):
     state.save_user_data()
     if media_id:
         from botlib.hooks import run_on_add
-        run_on_add(media_id, mode, user, name)
+        bot = query.message.get_bot()
+        run_on_add(media_id, mode, user, name, bot, query.message.chat_id)
 
     member_names = [_get_user_display_name(m) for m in members]
     await query.message.reply_text(

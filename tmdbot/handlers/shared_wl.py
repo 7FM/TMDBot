@@ -80,7 +80,8 @@ async def handle_smd(query, user, raw):
     state.save_user_data()
     if media_id is not None:
         from botlib.hooks import run_on_add
-        run_on_add(media_id, mode, user, sw_name)
+        run_on_add(media_id, mode, user, sw_name,
+                   query.message.get_bot(), query.message.chat_id)
     await query.answer(f'Created shared watchlist "{sw_name}"!')
     try:
         await query.message.delete()
