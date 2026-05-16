@@ -58,6 +58,7 @@ async def post_init(application):
         BotCommand("trending", "Trending books today"),
         BotCommand("pick", "Random book from your lists"),
         BotCommand("author", "Search by author"),
+        BotCommand("series", "Show series you are following"),
         BotCommand("stats", "View your reading statistics"),
         BotCommand("setname", "Set your display name"),
         BotCommand("fix", "Restore keyboard"),

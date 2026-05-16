@@ -3,8 +3,10 @@ from datetime import date, datetime, time as dt_time, timezone
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
+from telegram.ext import CommandHandler
 
 from botlib import state
+from botlib.base import BaseCommand
 from botlib.helpers import esc, _mode_to_type
 from botlib.messaging import send_back_text, send_movie_list
 from bookbot.config import hc_book, hc_series, hc_series_books
@@ -207,7 +209,26 @@ async def _daily_series_check(context):
         state.save_user_data()
 
 
+class FollowedSeriesCommand(BaseCommand):
+    async def execute(self, update, context, user):
+        followed = state.user_data[user].get("followed_series") or {}
+        if not followed:
+            await send_back_text(
+                update,
+                "You aren't following any series. Open a book, tap Series, then Follow.")
+            return
+        rows = []
+        for sid, entry in sorted(followed.items(), key=lambda kv: kv[1].get("name", "")):
+            name = entry.get("name") or f"Series {sid}"
+            label = name if len(name) <= 60 else name[:57] + "..."
+            rows.append([InlineKeyboardButton(label, callback_data=f"srsv:{sid}")])
+        await update.message.reply_text(
+            f"Following {len(followed)} series:",
+            reply_markup=InlineKeyboardMarkup(rows))
+
+
 def register(app, router):
+    app.add_handler(CommandHandler(['series', 'sr'], FollowedSeriesCommand()))
     router.add('srs', handle_srs)
     router.add('srsv', handle_srsv)
     router.add('srsf', handle_srsf)

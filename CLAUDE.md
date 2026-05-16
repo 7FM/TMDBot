@@ -98,7 +98,7 @@ bookbot/                         # Book bot
     ├── discovery.py             # RecommendCommand, PickCommand, TrendingCommand
     ├── info.py                  # StatsCommand, AuthorCommand + do_author_search()
     ├── onboarding.py            # StartCommand + name reply handler (no region/providers)
-    ├── series.py                # Series view, follow/unfollow toggle, daily new-release check (srs/srsv/srsf + _daily_series_check)
+    ├── series.py                # Series view, follow/unfollow toggle, daily new-release check, FollowedSeriesCommand (/series) (srs/srsv/srsf + _daily_series_check)
     └── misc.py                  # FixCommand, SetNameCommand, ClearCommand
 ```
 
@@ -243,4 +243,4 @@ Commands registered with aliases: `/search`/`/s`, `/list`/`/l`, `/recommend`/`/r
 
 ### BookBot
 
-Commands registered with aliases: `/search`/`/s`, `/list`/`/l`, `/recommend`/`/r`, `/pick`/`/p`, `/trending`/`/tr`, `/author`/`/ps`. Persistent keyboard for quick access. Plain text triggers search.
+Commands registered with aliases: `/search`/`/s`, `/list`/`/l`, `/recommend`/`/r`, `/pick`/`/p`, `/trending`/`/tr`, `/author`/`/ps`, `/series`/`/sr`. Persistent keyboard for quick access. Plain text triggers search.

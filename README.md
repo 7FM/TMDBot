@@ -83,6 +83,7 @@ A Telegram bot for discovering and managing books using the [Hardcover](https://
 | `/trending` | `/tr` | Browse trending books today |
 | `/pick` | `/p` | Pick a random book from a list |
 | `/author` | `/ps` | Search by author |
+| `/series` | `/sr` | List series you are following |
 | `/stats` | | View your reading statistics |
 | `/setname` | | Set your display name |
 | `/fix` | | Restore the keyboard if lost |
