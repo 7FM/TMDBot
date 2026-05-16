@@ -43,7 +43,7 @@ def _count_released_seasons(details):
             air_date = s.get("air_date")
         except (AttributeError, TypeError):
             continue
-        if air_date and air_date <= today:
+        if air_date and air_date < today:
             count += 1
     return count if count > 0 else (details.get("number_of_seasons") or 1)
 
