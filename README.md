@@ -52,7 +52,7 @@ A Telegram bot for discovering and managing movies and TV shows using [The Movie
 
 ## BookBot
 
-A Telegram bot for discovering and managing books using the [Open Library](https://openlibrary.org/) API.
+A Telegram bot for discovering and managing books using the [Hardcover](https://hardcover.app/) GraphQL API.
 
 ### Features
 
@@ -143,7 +143,7 @@ allowed_users:
 
 ```yaml
 telegram_token: "YOUR_BOOKBOT_TELEGRAM_TOKEN"
-email: "your@email.com"  # Required for Open Library API identification
+hardcover_token: "YOUR_HARDCOVER_BEARER_TOKEN"  # from hardcover.app account settings
 allowed_users:
   - 123456789
 ```
@@ -167,7 +167,7 @@ The script receives metadata via environment variables:
 
 | Variable | Bots | Description |
 |----------|------|-------------|
-| `MEDIA_ID` | both | TMDb ID or Open Library work ID |
+| `MEDIA_ID` | both | TMDb ID or Hardcover book ID |
 | `MODE` | both | `movie`, `tv`, or `book` |
 | `USER_ID` | both | Telegram user ID |
 | `WATCHLIST` | both | Watchlist name |
@@ -188,10 +188,10 @@ TMDBot/
 │   ├── helpers.py       # Movie/TV info extraction, providers, trailers
 │   ├── keyboards.py     # Mode switch, region, services, genre, season keyboards
 │   └── handlers/        # search, watchlist, watched, discovery, tv_seasons, info, ...
-├── bookbot/             # Book bot (Open Library API)
+├── bookbot/             # Book bot (Hardcover GraphQL API)
 │   ├── app.py           # Entry point, handler registration
-│   ├── config.py        # Open Library API client with rate limiting
-│   ├── helpers.py       # Book info extraction, cover URLs
+│   ├── config.py        # Hardcover GraphQL client with rate limiting
+│   ├── helpers.py       # Book info extraction
 │   ├── keyboards.py     # Main keyboard (no mode toggle)
 │   └── handlers/        # search, watchlist, read, discovery, info, ...
 ├── setup.py

@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 This repository contains two Telegram bots sharing a common library (`botlib/`):
 
 - **TMDBot** — movies and TV shows using [The Movie Database (TMDb)](https://www.themoviedb.org/) API
-- **BookBot** — books using the [Open Library](https://openlibrary.org/) API
+- **BookBot** — books using the [Hardcover](https://hardcover.app/) GraphQL API
 
 Both bots provide search, watchlist management (personal and shared/collaborative), rating, recommendations, trending, person/author search, statistics, and user onboarding. TMDBot additionally has streaming provider integration, TV season tracking, and a movie/TV mode switch.
 
@@ -35,7 +35,7 @@ Each bot needs its own settings YAML (git-ignored):
 
 **BookBot** (`bookbot_settings.yaml`):
 - `telegram_token` — Telegram bot token
-- `email` — email for Open Library API identification (required for 3 req/s rate limit)
+- `hardcover_token` — Hardcover GraphQL bearer token (account settings → API; 60 req/min, ~1yr expiry)
 - `allowed_users` — list of allowed Telegram user IDs
 
 User data is stored in `user_data.yaml` (auto-created). Each bot should use a separate user data file. Both files can be overridden via command line arguments.
@@ -84,9 +84,9 @@ tmdbot/                          # Movie/TV bot
 bookbot/                         # Book bot
 ├── __init__.py                  # from bookbot.app import main
 ├── __main__.py                  # from bookbot import main; main()
-├── config.py                    # Open Library API client (rate-limited requests.Session), user_data_initialize()
+├── config.py                    # Hardcover GraphQL client (rate-limited at 60 req/min), normalizers, user_data_initialize()
 ├── migration.py                 # Book-specific migrations
-├── helpers.py                   # extract_book_info, extract_book_detail, cover URLs, work_key_to_id/id_to_work_key
+├── helpers.py                   # extract_book_info, extract_book_detail (consume normalized dicts from config)
 ├── keyboards.py                 # get_main_keyboard (no mode toggle, no /check)
 ├── reply_handler.py             # Registers book-specific pending handlers (search, author, name) with botlib
 ├── app.py                       # main(), post_init(), error_handler(), handler registration
@@ -212,15 +212,15 @@ Stored in top-level `shared_watchlists` dict in `user_data.yaml` (keyed by numer
 
 ## BookBot-specific
 
-**Open Library API:** Direct `requests` usage against `openlibrary.org` REST API. Rate-limited at 3 requests/second with `threading.Lock`. User-Agent set to `BookBot/0.1 ({email})` using email from settings.
+**Hardcover API:** GraphQL endpoint at `https://api.hardcover.app/v1/graphql` (Hasura-backed). Bearer-token auth from `settings.hardcover_token`. Rate-limited at 60 req/min (1s interval) with `threading.Lock`. Backend-only — the same bot-owner token is used for all metadata reads.
 
-**API functions** in `bookbot/config.py`: `ol_search()`, `ol_work()`, `ol_search_authors()`, `ol_author_works()`, `ol_trending()`, `ol_subject()`.
+**API functions** in `bookbot/config.py`: `hc_query()` (raw GraphQL), plus normalized wrappers `hc_search()`, `hc_book()`, `hc_books()` (batch by IDs), `hc_search_authors()`, `hc_author_works()`, `hc_trending()`, `hc_subject()`, `hc_book_isbn()`. All wrappers return uniform book dicts via `_normalize_book()` / `_normalize_search_doc()` (keys: `id`, `title`, `authors`, `year`, `cover_url`, `rating`, `subjects`, `description`).
 
-**Work IDs:** Open Library OLIDs like `/works/OL27482W` are converted to numeric IDs (`27482`) for callback data compatibility. Converters: `work_key_to_id()`, `id_to_work_key()` in `bookbot/helpers.py`.
+**Book IDs:** Hardcover book IDs are plain integers (e.g., `356467` for Animal Farm) — stored directly in `watched`, `watchlists`, and `shared_watchlists`. No key/string conversion needed; they fit Telegram's 64-byte callback cap easily. Books and Editions are separate entities; we store book IDs (the "work" equivalent).
 
 **No mode toggle:** BookBot always uses `mode="book"`. No region/provider setup. Onboarding is name-entry only.
 
-**Recommendations:** Subject-based, seeded from read books' subjects.
+**Recommendations:** Subject-based — seeds collected from `book["subjects"]` (genres/tags/moods extracted from `cached_tags`); discovery via `hc_subject()` which runs a Typesense search.
 
 **Dependencies:** `python-telegram-bot`, `pyyaml`, `requests`
 
