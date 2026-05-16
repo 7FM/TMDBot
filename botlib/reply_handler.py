@@ -1,6 +1,6 @@
 from botlib import state
 from botlib.helpers import get_user_id, check_user_invalid, is_in_any_watchlist
-from botlib.keyboards import build_member_select_keyboard
+from botlib.keyboards import build_member_select_keyboard, _labels
 from botlib.messaging import send_back_text, unauthorized_msg
 
 # Domain-specific pending handlers: list of (check_fn, handler_fn)
@@ -59,22 +59,22 @@ async def reply_handler(update, context):
         movie_id, nwl_mode = state._pending_new_watchlist.pop(
             user, (None, "movie"))
         if not text:
-            await send_back_text(update, "Watchlist name cannot be empty.")
+            await send_back_text(update, "List name cannot be empty.")
             return
         if text in state.user_data[user]["watchlists"][nwl_mode]:
-            await send_back_text(update, f'Watchlist "{text}" already exists.')
+            await send_back_text(update, f'List "{text}" already exists.')
             return
         state.user_data[user]["watchlists"][nwl_mode][text] = []
         if movie_id is None:
             state.save_user_data()
-            await send_back_text(update, f'Created watchlist "{text}".')
+            await send_back_text(update, f'Created list "{text}".')
         else:
             already_in = is_in_any_watchlist(movie_id, user, mode=nwl_mode)
             if already_in:
-                await send_back_text(update, f'Already in your "{already_in}" watchlist.')
+                await send_back_text(update, f'Already in your "{already_in}" list.')
             else:
                 state.user_data[user]["watchlists"][nwl_mode][text].append(
                     movie_id)
                 state.save_user_data()
-                await send_back_text(update, f'Created watchlist "{text}" and added it.')
+                await send_back_text(update, f'Created list "{text}" and added it.')
         return

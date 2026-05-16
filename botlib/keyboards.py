@@ -16,6 +16,7 @@ _labels = {
     "expand_m": "Show movies",
     "expand_tv": "Show items",
     "expand_b": "Show books",
+    "new_watchlist": "New watchlist",
 }
 
 
@@ -108,7 +109,7 @@ def build_watchlist_select_keyboard(user: int, edit_mode: bool = False, mode=Non
         rows.append([InlineKeyboardButton("Back", callback_data="wlback")])
     else:
         rows.append([
-            InlineKeyboardButton("New watchlist", callback_data="nwl"),
+            InlineKeyboardButton(_labels["new_watchlist"], callback_data="nwl"),
             InlineKeyboardButton("New shared", callback_data="nswl"),
             InlineKeyboardButton("Edit", callback_data="wledit")
         ])
