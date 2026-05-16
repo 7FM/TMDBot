@@ -14,7 +14,7 @@ from botlib.keyboards import build_media_keyboard, build_recommend_category_keyb
 from botlib.messaging import send_back_text, send_movie_list
 from bookbot.keyboards import get_main_keyboard
 from bookbot.helpers import extract_book_info, sort_by_rating
-from bookbot.config import ol_work, ol_subject, ol_trending
+from bookbot.config import hc_book, hc_books, hc_subject, hc_trending
 
 logger = logging.getLogger(__name__)
 
@@ -39,8 +39,8 @@ async def _do_recommend(update, user, watchlist):
     chat_id = update.message.chat_id if hasattr(
         update, 'message') and update.message else update.chat_id
 
-    # Collect subjects from highly-rated watched books matching category
-    seed_subjects = {}
+    # Collect seed IDs from highly-rated watched matching category, + watchlist items
+    seed_ids = []
     for mid, entry in watched.items():
         r = get_watched_rating(entry)
         if r is None or r < 7:
@@ -48,37 +48,29 @@ async def _do_recommend(update, user, watchlist):
         cat = get_watched_category(entry)
         if watchlist != "all" and cat != watchlist:
             continue
-        try:
-            data = ol_work(mid)
-            for s in data.get("subjects", [])[:5]:
-                s_lower = s.lower().strip()
-                if len(s_lower) < 3 or len(s_lower) > 40:
-                    continue
-                if s_lower in ("fiction", "general", "juvenile fiction"):
-                    continue
-                seed_subjects[s_lower] = seed_subjects.get(s_lower, 0) + 1
-        except Exception:
-            continue
+        seed_ids.append(mid)
 
-    # Also add items from the selected watchlist
     if watchlist != "all":
         wl_items = state.user_data[user]["watchlists"][mode].get(watchlist, [])
     else:
         wl_items = []
         for wl in state.user_data[user]["watchlists"][mode].values():
             wl_items.extend(wl)
-    for mid in wl_items:
-        try:
-            data = ol_work(mid)
-            for s in data.get("subjects", [])[:3]:
-                s_lower = s.lower().strip()
-                if len(s_lower) < 3 or len(s_lower) > 40:
-                    continue
-                if s_lower in ("fiction", "general", "juvenile fiction"):
-                    continue
-                seed_subjects[s_lower] = seed_subjects.get(s_lower, 0) + 1
-        except Exception:
-            continue
+    seed_ids.extend(wl_items)
+
+    seed_subjects = {}
+    try:
+        seed_books = hc_books(seed_ids)
+    except Exception:
+        seed_books = {}
+    for book in seed_books.values():
+        for s in (book.get("subjects") or [])[:5]:
+            s_lower = s.lower().strip()
+            if len(s_lower) < 3 or len(s_lower) > 40:
+                continue
+            if s_lower in ("fiction", "general", "juvenile fiction"):
+                continue
+            seed_subjects[s_lower] = seed_subjects.get(s_lower, 0) + 1
 
     if not seed_subjects:
         await send_back_text(update, "Not enough data to generate recommendations. "
@@ -95,18 +87,11 @@ async def _do_recommend(update, user, watchlist):
 
     for subject in top_subjects:
         try:
-            subject_slug = subject.replace(" ", "_").lower()
-            works = ol_subject(subject_slug, limit=20)
-            for w in works:
-                key = w.get("key", "")
-                wid = None
-                if key.startswith("/works/OL") and key.endswith("W"):
-                    try:
-                        wid = int(key[len("/works/OL"):-1])
-                    except ValueError:
-                        continue
-                if wid and wid not in already_known and wid not in all_recs:
-                    all_recs[wid] = w
+            books = hc_subject(subject, limit=20)
+            for b in books:
+                bid = b.get("id")
+                if bid and bid not in already_known and bid not in all_recs:
+                    all_recs[bid] = b
         except Exception:
             continue
 
@@ -116,15 +101,12 @@ async def _do_recommend(update, user, watchlist):
 
     # Format and display
     infos = []
-    for wid, w in all_recs.items():
-        title = w.get("title", "Unknown")
-        authors = [a.get("name", "") for a in w.get("authors", [])]
+    for bid, b in all_recs.items():
+        title = b.get("title") or "Unknown"
+        authors = b.get("authors") or []
         author_str = ", ".join(authors[:2]) if authors else "Unknown author"
-        cover_id = w.get("cover_id")
-        from bookbot.helpers import get_cover_url
-        cover_url = get_cover_url(cover_id)
         desc = f'`{title}` - {author_str}'
-        infos.append((0, wid, title, desc))
+        infos.append((0, bid, title, desc))
 
     random.shuffle(infos)
     infos = infos[:20]
@@ -176,8 +158,8 @@ class PickCommand(BaseCommand):
 
         mid, wl_name = random.choice(all_items)
         try:
-            data = ol_work(mid)
-            info = extract_book_info(data, from_search=False)
+            book = hc_book(mid)
+            info = extract_book_info(book)
             _, cover_url, desc, _ = info
         except Exception:
             desc = f"Book ID: {mid}"
@@ -218,8 +200,8 @@ async def handle_rpick(query, user, raw):
 
     mid, wl_name = random.choice(all_items)
     try:
-        data = ol_work(mid)
-        info = extract_book_info(data, from_search=False)
+        book = hc_book(mid)
+        info = extract_book_info(book)
         _, cover_url, desc, _ = info
     except Exception:
         desc = f"Book ID: {mid}"
@@ -252,7 +234,7 @@ class TrendingCommand(BaseCommand):
         mode = "book"
         mt = _mode_to_type(mode)
         try:
-            results = ol_trending(limit=20)
+            results = hc_trending(limit=20)
         except Exception as e:
             logger.error("Trending fetch failed: %s", e)
             await send_back_text(update, "Failed to fetch trending books.")
@@ -260,10 +242,10 @@ class TrendingCommand(BaseCommand):
 
         watched = state.user_data[user].get("watched", {}).get(mode, {})
         infos = []
-        for doc in results:
-            info = extract_book_info(doc, from_search=True)
+        for book in results:
+            info = extract_book_info(book)
             if info[3] is not None and info[3] not in watched:
-                infos.append((info[3], doc.get("title", "Unknown"), info[2]))
+                infos.append((info[3], book.get("title", "Unknown"), info[2]))
         if not infos:
             await send_back_text(update, "No new trending books (all already read).")
             return

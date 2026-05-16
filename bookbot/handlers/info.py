@@ -7,8 +7,8 @@ from botlib import state
 from botlib.base import BaseCommand
 from botlib.helpers import get_watched_rating, _mode_to_type
 from botlib.messaging import send_back_text, send_movie_list, _with_progress_bar
-from bookbot.config import ol_search_authors, ol_author_works, ol_work
-from bookbot.helpers import extract_book_info, sort_by_rating, work_key_to_id
+from bookbot.config import hc_search_authors, hc_author_works, hc_books
+from bookbot.helpers import extract_book_info, sort_by_rating
 
 logger = logging.getLogger(__name__)
 
@@ -46,20 +46,20 @@ class StatsCommand(BaseCommand):
             bar = "\u2588" * bar_len + "\u2591" * (bar_width - bar_len)
             lines.append(f"{i+1:2d} [{bar}] {count}")
 
-        # Top subjects (requires API calls)
+        # Top subjects (one batch fetch)
         bot = update.get_bot()
         chat_id = update.message.chat_id
 
         def fetch_subjects(tick):
             subject_counts = {}
-            for mid in watched:
-                try:
-                    data = ol_work(mid)
-                    for s in data.get("subjects", [])[:3]:
-                        if len(s) < 30 and s.lower() not in ("fiction", "general"):
-                            subject_counts[s] = subject_counts.get(s, 0) + 1
-                except Exception:
-                    pass
+            try:
+                books = hc_books(list(watched.keys()))
+            except Exception:
+                books = {}
+            for book in books.values():
+                for s in (book.get("subjects") or [])[:3]:
+                    if len(s) < 30 and s.lower() not in ("fiction", "general"):
+                        subject_counts[s] = subject_counts.get(s, 0) + 1
                 tick()
             return subject_counts
 
@@ -93,7 +93,7 @@ async def do_author_search(update, query, user):
     mode = "book"
     mt = _mode_to_type(mode)
     try:
-        authors = ol_search_authors(query, limit=5)
+        authors = hc_search_authors(query, limit=5)
     except Exception as e:
         logger.error("Author search failed: %s", e)
         await send_back_text(update, "Author search failed.")
@@ -103,13 +103,12 @@ async def do_author_search(update, query, user):
         await send_back_text(update, f'No authors found for "{query}".')
         return
 
-    # Take the top author match
     author = authors[0]
     author_name = author.get("name", "Unknown")
-    author_key = author.get("key", "")
+    author_id = author.get("id")
 
     try:
-        works = ol_author_works(author_key, limit=50)
+        works = hc_author_works(author_id, limit=50)
     except Exception as e:
         logger.error("Author works fetch failed: %s", e)
         await send_back_text(update, f"Failed to fetch works by {author_name}.")
@@ -121,24 +120,17 @@ async def do_author_search(update, query, user):
 
     watched = state.user_data[user].get("watched", {}).get(mode, {})
     infos = []
-    for w in works:
-        key = w.get("key", "")
-        wid = work_key_to_id(key)
-        if wid is None:
+    for book in works:
+        bid = book.get("id") if book else None
+        if bid is None or bid in watched:
             continue
-        if wid in watched:
-            continue
-        title = w.get("title", "Unknown")
-        covers = w.get("covers", [])
-        cover_id = covers[0] if covers else None
-        subjects = w.get("subjects", [])[:3] if "subjects" in w else []
-        from bookbot.helpers import get_cover_url
+        title = book.get("title", "Unknown")
+        subjects = (book.get("subjects") or [])[:3]
         desc = f'`{title}` - {author_name}'
-        if subjects:
-            clean = [s for s in subjects if len(s) < 30][:3]
-            if clean:
-                desc += f' - {", ".join(clean)}'
-        infos.append((wid, title, desc))
+        clean = [s for s in subjects if len(s) < 30][:3]
+        if clean:
+            desc += f' - {", ".join(clean)}'
+        infos.append((bid, title, desc))
 
     if not infos:
         await send_back_text(update, f"No new works by {author_name} (all already read).")

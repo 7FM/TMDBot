@@ -21,7 +21,7 @@ from botlib.messaging import (
 )
 from bookbot.keyboards import get_main_keyboard
 from bookbot.helpers import extract_book_info
-from bookbot.config import ol_work
+from bookbot.config import hc_books
 
 logger = logging.getLogger(__name__)
 
@@ -77,31 +77,25 @@ async def _send_rate_list(update, user):
     bot = update.get_bot()
     chat_id = update.message.chat_id
 
-    import concurrent.futures
-    import multiprocessing
-
     def fetch_all(tick):
         results = []
-        max_workers = min(len(items), multiprocessing.cpu_count() * 2)
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
-            futures = {}
-            for mid, entry in items:
-                futures[pool.submit(ol_work, mid)] = (mid, entry)
-            for f in concurrent.futures.as_completed(futures):
-                mid, entry = futures[f]
-                try:
-                    data = f.result()
-                    info = extract_book_info(data, from_search=False)
-                    title = data.get("title", f"Book {mid}")
-                    r = get_watched_rating(entry)
-                    cat = get_watched_category(entry)
-                    rating_str = f" [{r}/10]" if r else " [unrated]"
-                    cat_str = f" [{cat}]" if cat else ""
-                    results.append(
-                        (mid, title, info[2] + rating_str + cat_str))
-                except Exception:
-                    results.append((mid, f"Book {mid}", f"Book {mid}"))
-                tick()
+        try:
+            books = hc_books([mid for mid, _ in items])
+        except Exception:
+            books = {}
+        for mid, entry in items:
+            book = books.get(mid)
+            r = get_watched_rating(entry)
+            cat = get_watched_category(entry)
+            rating_str = f" [{r}/10]" if r else " [unrated]"
+            cat_str = f" [{cat}]" if cat else ""
+            if book:
+                info = extract_book_info(book)
+                title = book.get("title", f"Book {mid}")
+                results.append((mid, title, info[2] + rating_str + cat_str))
+            else:
+                results.append((mid, f"Book {mid}", f"Book {mid}{rating_str}{cat_str}"))
+            tick()
         return results
 
     await _cleanup_rate_list(bot, user)
@@ -277,17 +271,26 @@ async def handle_rate(query, user, raw):
     chat_id = query.message.chat_id
 
     rating_str = f" ({rating}/10)" if rating else ""
-    await bot.send_message(
-        chat_id, esc(f"Marked as read{rating_str}."),
-        reply_markup=get_main_keyboard(user),
-        parse_mode="MarkdownV2")
-
-    # Send undo button
     undo_kb = InlineKeyboardMarkup(
         [[InlineKeyboardButton("Undo?", callback_data="undo")]])
-    await bot.send_message(chat_id, "Undo?", reply_markup=undo_kb)
 
-    await _cleanup_search_results(bot, user)
+    if _is_search_message(user, query.message.message_id):
+        await _cleanup_search_results(bot, user)
+        await bot.send_message(
+            chat_id, esc(f"Marked as read{rating_str}."),
+            reply_markup=get_main_keyboard(user),
+            parse_mode="MarkdownV2")
+        await bot.send_message(chat_id, "Undo?", reply_markup=undo_kb)
+    else:
+        try:
+            await query.message.delete()
+        except Exception:
+            await query.edit_message_reply_markup(reply_markup=None)
+        await bot.send_message(
+            chat_id, esc(f"Marked as read{rating_str}."),
+            reply_markup=get_main_keyboard(user),
+            parse_mode="MarkdownV2")
+        await bot.send_message(chat_id, "Undo?", reply_markup=undo_kb)
 
     # Notify shared watchlist members if applicable
     shared_wls = find_all_shared_watchlists(mid, user, mode=rate_mode)

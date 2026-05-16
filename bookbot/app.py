@@ -28,46 +28,13 @@ _HANDLER_MODULES = [
 
 
 def _fetch_book_metadata(media_id, mode):
-    """Fetch Open Library metadata for the on_add hook."""
-    from bookbot.config import ol_work, _rate_limited_get, OL_BASE
-    data = ol_work(media_id)
-    title = data.get("title", "")
-
-    # Get author names from author references
-    authors = []
-    for a in data.get("authors", []):
-        author_key = a.get("author", {}).get("key", "")
-        if author_key:
-            try:
-                ad = _rate_limited_get(
-                    f"{OL_BASE}{author_key}.json").json()
-                authors.append(ad.get("name", ""))
-            except Exception:
-                pass
-    author = ", ".join(authors)
-
-    # Get ISBN from editions
-    isbn = ""
-    try:
-        editions = _rate_limited_get(
-            f"{OL_BASE}/works/OL{media_id}W/editions.json",
-            params={"limit": 5}).json()
-        for ed in editions.get("entries", []):
-            isbn_13 = ed.get("isbn_13", [])
-            if isbn_13:
-                isbn = isbn_13[0]
-                break
-            isbn_10 = ed.get("isbn_10", [])
-            if isbn_10:
-                isbn = isbn_10[0]
-                break
-    except Exception:
-        pass
-
+    """Fetch Hardcover metadata for the on_add hook."""
+    from bookbot.config import hc_book, hc_book_isbn
+    book = hc_book(media_id) or {}
     return {
-        "TITLE": title,
-        "AUTHOR": author,
-        "ISBN": isbn,
+        "TITLE": book.get("title") or "",
+        "AUTHOR": ", ".join(book.get("authors") or []),
+        "ISBN": hc_book_isbn(media_id),
         "MEDIA_TYPE": "book",
     }
 
@@ -86,6 +53,7 @@ async def post_init(application):
         BotCommand("author", "Search by author"),
         BotCommand("stats", "View your reading statistics"),
         BotCommand("setname", "Set your display name"),
+        BotCommand("fix", "Restore keyboard"),
     ])
 
 
@@ -112,7 +80,7 @@ def main():
 
     # Register domain-specific overrides with botlib
     register_main_keyboard_fn(get_main_keyboard)
-    configure_labels({"watched": "Read"})
+    configure_labels({"watched": "Read", "new_watchlist": "New list"})
     register_metadata_fetcher(_fetch_book_metadata)
 
     application = Application.builder().token(

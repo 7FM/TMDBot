@@ -22,7 +22,7 @@ from botlib.messaging import (
 )
 from bookbot.keyboards import get_main_keyboard
 from bookbot.helpers import extract_book_info, extract_book_detail
-from bookbot.config import ol_work
+from bookbot.config import hc_books
 from botlib.hooks import run_on_add
 
 logger = logging.getLogger(__name__)
@@ -86,15 +86,18 @@ async def _show_watchlist_contents(bot, chat_id, user, wl_name, mode="book"):
         await bot.send_message(chat_id, f'"{wl_name}" is empty.')
         return
     mt = _mode_to_type(mode)
+    try:
+        books = hc_books(items)
+    except Exception:
+        books = {}
     infos = []
-    for work_id in items:
-        try:
-            data = ol_work(work_id)
-            info = extract_book_info(data, from_search=False)
-            if info[3] is not None:
-                infos.append((info[3], data.get("title", "Unknown"), info[2]))
-        except Exception:
-            infos.append((work_id, f"Book {work_id}", f"Book ID: {work_id}"))
+    for book_id in items:
+        book = books.get(book_id)
+        if book:
+            info = extract_book_info(book)
+            infos.append((book_id, book.get("title", "Unknown"), info[2]))
+        else:
+            infos.append((book_id, f"Book {book_id}", f"Book ID: {book_id}"))
 
     await send_movie_list(bot, chat_id, f'"{wl_name}":', infos,
                           detail_action="det", media_type=mt)

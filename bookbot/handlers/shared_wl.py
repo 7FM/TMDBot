@@ -18,7 +18,7 @@ from botlib.keyboards import (
 from botlib.messaging import send_movie_list
 from bookbot.keyboards import get_main_keyboard
 from bookbot.helpers import extract_book_info
-from bookbot.config import ol_work
+from bookbot.config import hc_books
 
 logger = logging.getLogger(__name__)
 
@@ -118,15 +118,18 @@ async def handle_swb(query, user, raw):
             reply_markup=get_main_keyboard(user))
         return
 
+    try:
+        books = hc_books(items)
+    except Exception:
+        books = {}
     infos = []
-    for work_id in items:
-        try:
-            data = ol_work(work_id)
-            info = extract_book_info(data, from_search=False)
-            if info[3] is not None:
-                infos.append((info[3], data.get("title", "Unknown"), info[2]))
-        except Exception:
-            infos.append((work_id, f"Book {work_id}", f"Book ID: {work_id}"))
+    for book_id in items:
+        book = books.get(book_id)
+        if book:
+            info = extract_book_info(book)
+            infos.append((book_id, book.get("title", "Unknown"), info[2]))
+        else:
+            infos.append((book_id, f"Book {book_id}", f"Book ID: {book_id}"))
 
     await send_movie_list(
         query.message.get_bot(), query.message.chat_id,

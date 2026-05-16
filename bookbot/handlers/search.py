@@ -12,7 +12,7 @@ from botlib.messaging import (
     send_back_text, send_movie_message, send_movie_list,
     _cleanup_search_results, _is_search_message,
 )
-from bookbot.config import ol_search
+from bookbot.config import hc_search
 from bookbot.helpers import extract_book_info, extract_book_detail, sort_by_rating
 
 logger = logging.getLogger(__name__)
@@ -33,9 +33,9 @@ class SearchCommand(BaseCommand):
 async def do_search(update, query, user):
     await _cleanup_search_results(update.get_bot(), user)
     try:
-        results = ol_search(query, limit=25)
+        results = hc_search(query, limit=25)
     except Exception as e:
-        logger.error("OL search failed: %s", e)
+        logger.error("Hardcover search failed: %s", e)
         await send_back_text(update, "Search failed. Please try again.")
         return
 
@@ -46,8 +46,8 @@ async def do_search(update, query, user):
     mode = "book"
     watched = state.user_data[user].get("watched", {}).get(mode, {})
     infos = []
-    for doc in results:
-        info = extract_book_info(doc, from_search=True)
+    for book in results:
+        info = extract_book_info(book)
         if info[3] is not None and info[3] not in watched:
             infos.append(info)
 
