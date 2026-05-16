@@ -24,6 +24,15 @@ def configure_labels(overrides):
     _labels.update(overrides)
 
 
+# Extra-button extension. Domain packages append fns of shape
+# fn(media_id, user, mode) -> InlineKeyboardButton or None
+_extra_media_button_fns = []
+
+
+def register_media_button(fn):
+    _extra_media_button_fns.append(fn)
+
+
 def build_media_keyboard(media_id: int, user: int, mode=None) -> InlineKeyboardMarkup:
     if mode is None:
         mode = state.user_data[user].get("mode", "movie")
@@ -41,7 +50,18 @@ def build_media_keyboard(media_id: int, user: int, mode=None) -> InlineKeyboardM
     if not already_watched:
         buttons.append(InlineKeyboardButton(
             _labels["watched"], callback_data=f"w:{mt}:{media_id}"))
-    return InlineKeyboardMarkup([buttons])
+    rows = [buttons]
+    extras = []
+    for fn in _extra_media_button_fns:
+        try:
+            btn = fn(media_id, user, mode)
+        except Exception:
+            btn = None
+        if btn is not None:
+            extras.append(btn)
+    if extras:
+        rows.append(extras)
+    return InlineKeyboardMarkup(rows)
 
 
 def build_watchlist_picker_keyboard(media_id: int, user: int, mode=None) -> InlineKeyboardMarkup:

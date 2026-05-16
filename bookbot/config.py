@@ -1,6 +1,9 @@
+import base64
+import json
 import logging
 import time
 import threading
+from datetime import datetime, timezone
 
 import requests
 
@@ -30,16 +33,66 @@ def _rate_limited_post(payload):
     return _session.post(HC_ENDPOINT, json=payload)
 
 
+_auth_failure_handlers = []
+
+
+def register_auth_failure_handler(fn):
+    """fn(error_message) called once when a request fails due to auth."""
+    _auth_failure_handlers.append(fn)
+
+
+def _notify_auth_failure(msg):
+    for fn in _auth_failure_handlers:
+        try:
+            fn(msg)
+        except Exception:
+            logger.exception("auth failure handler raised")
+
+
 def hc_query(query, variables=None):
     payload = {"query": query}
     if variables:
         payload["variables"] = variables
     r = _rate_limited_post(payload)
+    if r.status_code in (401, 403):
+        _notify_auth_failure(f"Hardcover API returned {r.status_code} — token likely invalid or expired")
+        r.raise_for_status()
     r.raise_for_status()
     body = r.json()
     if "errors" in body:
-        raise RuntimeError(f"Hardcover GraphQL error: {body['errors']}")
+        errs = body["errors"]
+        for e in errs if isinstance(errs, list) else []:
+            code = ((e or {}).get("extensions") or {}).get("code", "")
+            if code in ("invalid-jwt", "access-denied", "validation-failed"):
+                _notify_auth_failure(f"Hardcover GraphQL auth error: {code}")
+                break
+        raise RuntimeError(f"Hardcover GraphQL error: {errs}")
     return body.get("data") or {}
+
+
+def token_expiry_datetime():
+    """Decode JWT exp claim, return UTC datetime or None on failure."""
+    token = settings.get("hardcover_token", "") or ""
+    parts = token.split(".")
+    if len(parts) != 3:
+        return None
+    try:
+        payload_b64 = parts[1] + "=" * (-len(parts[1]) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(payload_b64))
+        exp = payload.get("exp")
+        if not isinstance(exp, int):
+            return None
+        return datetime.fromtimestamp(exp, tz=timezone.utc)
+    except Exception:
+        return None
+
+
+def token_days_remaining():
+    exp = token_expiry_datetime()
+    if exp is None:
+        return None
+    delta = exp - datetime.now(timezone.utc)
+    return delta.total_seconds() / 86400.0
 
 
 _BOOK_FIELDS = """
@@ -51,6 +104,7 @@ _BOOK_FIELDS = """
   image { url }
   cached_tags
   contributions { author { name } }
+  book_series { position featured series { id slug name books_count } }
 """
 
 
@@ -78,6 +132,18 @@ def _normalize_book(b):
             authors.append(name)
     image = b.get("image") or {}
     cover_url = image.get("url") if isinstance(image, dict) else None
+    series = []
+    for bs in b.get("book_series") or []:
+        s = (bs or {}).get("series") or {}
+        if s.get("id"):
+            series.append({
+                "id": s.get("id"),
+                "slug": s.get("slug"),
+                "name": s.get("name") or "Unknown",
+                "books_count": s.get("books_count"),
+                "position": bs.get("position"),
+                "featured": bs.get("featured", False),
+            })
     return {
         "id": b.get("id"),
         "title": b.get("title") or "Unknown",
@@ -87,6 +153,7 @@ def _normalize_book(b):
         "rating": b.get("rating"),
         "subjects": _tags_to_subjects(b.get("cached_tags")),
         "description": b.get("description"),
+        "series": series,
     }
 
 
@@ -232,6 +299,89 @@ def hc_trending(limit=20):
 def hc_subject(subject, limit=20):
     """Find books matching a subject — uses search ranking."""
     return hc_search(subject, limit=limit)
+
+
+def hc_series(series_id):
+    """Fetch series metadata. Returns {id, slug, name, description, books_count, author_name} or None."""
+    q = """
+    query S($id: Int!) {
+      series_by_pk(id: $id) {
+        id slug name description books_count
+        author { name }
+      }
+    }
+    """
+    try:
+        data = hc_query(q, {"id": int(series_id)})
+    except Exception:
+        return None
+    s = data.get("series_by_pk")
+    if not s:
+        return None
+    return {
+        "id": s.get("id"),
+        "slug": s.get("slug"),
+        "name": s.get("name") or "Unknown",
+        "description": s.get("description"),
+        "books_count": s.get("books_count"),
+        "author_name": (s.get("author") or {}).get("name"),
+    }
+
+
+def hc_series_books(series_id):
+    """Get books in a series, deduped by position (picks max users_count per position).
+
+    Returns list of {book_id, title, position, release_date, release_year, users_count, rating, authors, cover_url}
+    sorted by position asc.
+    """
+    q = """
+    query SB($id: Int!) {
+      book_series(where: {series_id: {_eq: $id}}, order_by: {position: asc}) {
+        position
+        featured
+        book {
+          id title release_date release_year users_count rating
+          image { url }
+          contributions { author { name } }
+        }
+      }
+    }
+    """
+    try:
+        data = hc_query(q, {"id": int(series_id)})
+    except Exception:
+        return []
+
+    by_position = {}
+    for row in data.get("book_series") or []:
+        pos = row.get("position")
+        book = row.get("book") or {}
+        bid = book.get("id")
+        if bid is None:
+            continue
+        users = book.get("users_count") or 0
+        existing = by_position.get(pos)
+        if existing and (existing[0].get("users_count") or 0) >= users:
+            continue
+        authors = []
+        for c in book.get("contributions") or []:
+            name = ((c or {}).get("author") or {}).get("name")
+            if name and name not in authors:
+                authors.append(name)
+        image = book.get("image") or {}
+        by_position[pos] = (book, {
+            "book_id": bid,
+            "title": book.get("title") or "Unknown",
+            "position": pos,
+            "release_date": book.get("release_date"),
+            "release_year": book.get("release_year"),
+            "users_count": users,
+            "rating": book.get("rating"),
+            "authors": authors,
+            "cover_url": image.get("url") if isinstance(image, dict) else None,
+        })
+
+    return [v[1] for _, v in sorted(by_position.items(), key=lambda kv: (kv[0] is None, kv[0] or 0))]
 
 
 def hc_book_isbn(book_id):

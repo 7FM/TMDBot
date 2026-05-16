@@ -46,6 +46,18 @@ def extract_book_info(book):
     return (sort_rating, cover_url, desc, book_id)
 
 
+def _format_series_line(series):
+    """Render the 'Series:' line for a book detail card. Returns '' if no series."""
+    if not series:
+        return ""
+    bits = []
+    for s in series:
+        pos = s.get("position")
+        name = s.get("name") or "Unknown"
+        bits.append(f"{name} (#{pos})" if pos is not None else name)
+    return "Series: " + ", ".join(bits)
+
+
 def extract_book_detail(book_id):
     """Fetch and format detailed book info for a detail card."""
     try:
@@ -63,6 +75,9 @@ def extract_book_detail(book_id):
         desc_raw = desc_raw[:497] + "..."
 
     parts = [f'`{title}`']
+    series_line = _format_series_line(book.get("series"))
+    if series_line:
+        parts.append(series_line)
     clean = [s for s in subjects if len(s) < 30][:5]
     if clean:
         parts.append(", ".join(clean))
