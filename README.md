@@ -66,6 +66,8 @@ A Telegram bot for discovering and managing books using the [Hardcover](https://
 - **Random picker** -- pick a random book from your lists
 - **Stats** -- view your reading statistics with rating distribution and top subjects
 - **Rating** -- rate read books (1-10) and browse/re-rate your history
+- **Series** -- see what series a book belongs to, browse all books in a series (including unreleased entries), and follow series to get notified when new books drop
+- **Token health** -- warns via Telegram when the Hardcover token is near expiry or has stopped working
 
 ### Commands
 
@@ -189,11 +191,11 @@ TMDBot/
 │   ├── keyboards.py     # Mode switch, region, services, genre, season keyboards
 │   └── handlers/        # search, watchlist, watched, discovery, tv_seasons, info, ...
 ├── bookbot/             # Book bot (Hardcover GraphQL API)
-│   ├── app.py           # Entry point, handler registration
-│   ├── config.py        # Hardcover GraphQL client with rate limiting
+│   ├── app.py           # Entry point, handler registration, Hardcover token monitoring
+│   ├── config.py        # Hardcover GraphQL client with rate limiting, JWT decoder
 │   ├── helpers.py       # Book info extraction
 │   ├── keyboards.py     # Main keyboard (no mode toggle)
-│   └── handlers/        # search, watchlist, read, discovery, info, ...
+│   └── handlers/        # search, watchlist, read, discovery, info, series, ...
 ├── setup.py
 └── flake.nix
 ```

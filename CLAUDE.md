@@ -84,12 +84,12 @@ tmdbot/                          # Movie/TV bot
 bookbot/                         # Book bot
 ├── __init__.py                  # from bookbot.app import main
 ├── __main__.py                  # from bookbot import main; main()
-├── config.py                    # Hardcover GraphQL client (rate-limited at 60 req/min), normalizers, user_data_initialize()
+├── config.py                    # Hardcover GraphQL client (rate-limited at 60 req/min), normalizers, JWT expiry decoder, user_data_initialize()
 ├── migration.py                 # Book-specific migrations
-├── helpers.py                   # extract_book_info, extract_book_detail (consume normalized dicts from config)
+├── helpers.py                   # extract_book_info, extract_book_detail (consume normalized dicts from config; series line in detail)
 ├── keyboards.py                 # get_main_keyboard (no mode toggle, no /check)
 ├── reply_handler.py             # Registers book-specific pending handlers (search, author, name) with botlib
-├── app.py                       # main(), post_init(), error_handler(), handler registration
+├── app.py                       # main(), post_init(), error_handler(), handler registration, Hardcover token monitoring (startup + daily + auth-failure)
 └── handlers/
     ├── search.py                # SearchCommand + do_search() + smore, det, rdet, exp/col + default_search_handler
     ├── watchlist.py             # ListCommand, AddCommand, RemoveCommand + fallback handler
@@ -98,6 +98,7 @@ bookbot/                         # Book bot
     ├── discovery.py             # RecommendCommand, PickCommand, TrendingCommand
     ├── info.py                  # StatsCommand, AuthorCommand + do_author_search()
     ├── onboarding.py            # StartCommand + name reply handler (no region/providers)
+    ├── series.py                # Series view, follow/unfollow toggle, daily new-release check (srs/srsv/srsf + _daily_series_check)
     └── misc.py                  # FixCommand, SetNameCommand, ClearCommand
 ```
 
@@ -108,6 +109,7 @@ bookbot/                         # Book bot
 **Registry pattern:** `botlib` uses registries to break circular dependencies with domain packages:
 - `botlib.messaging.register_main_keyboard_fn(fn)` — domain provides its `get_main_keyboard`
 - `botlib.keyboards.configure_labels(overrides)` — domain overrides button text (e.g., BookBot sets `"watched": "Read"`)
+- `botlib.keyboards.register_media_button(fn)` — domain appends extra buttons to `build_media_keyboard` (e.g., BookBot adds "Series")
 - `botlib.reply_handler.register_pending_handler(check_fn, handler_fn)` — domain registers ForceReply handlers
 
 **Re-export pattern:** `tmdbot/helpers.py` and `tmdbot/keyboards.py` re-export generic functions from `botlib` (via `from botlib.helpers import ... # noqa: F401`) alongside domain-specific functions. This allows existing handler code to use `from tmdbot.helpers import esc` without change. `bookbot/` handlers import from `botlib` directly.
@@ -175,6 +177,11 @@ Action prefixes (shared):
 - `smore` — show next search results; `undo` — undo last watch/read
 - Shared: `nswl`, `smu:<index>`, `smd`, `swb:<sw_id>`, `swdet:type:id`, `sa:type:id:sw_id`, `srm:type:id:sw_id`, `sdwl/sdwly/sdwln`
 
+BookBot-specific:
+- `srs:b:<book_id>` — open series for a book (picker if multi, jump if single)
+- `srsv:<series_id>` — series view (header + book list + follow toggle)
+- `srsf:<series_id>` — follow/unfollow toggle
+
 TMDBot-specific:
 - `sp:<index>` — toggle streaming provider; `reg:<code>` / `regp:<page>` / `chreg` — region
 - `gf:<genre_id>` — genre filter; `recgo:skip` / `recgo:filter` — launch recommendations
@@ -221,6 +228,10 @@ Stored in top-level `shared_watchlists` dict in `user_data.yaml` (keyed by numer
 **No mode toggle:** BookBot always uses `mode="book"`. No region/provider setup. Onboarding is name-entry only.
 
 **Recommendations:** Subject-based — seeds collected from `book["subjects"]` (genres/tags/moods extracted from `cached_tags`); discovery via `hc_subject()` which runs a Typesense search.
+
+**Series:** Each book carries `series: [{id, slug, name, books_count, position, featured}]` (book can belong to multiple series; the Mistborn books typically belong to 2–3). The Series button on a book opens a picker (multi) or jumps to the series view. Series view fetches `book_series` rows for a `series_id`, dedupes by `position` (Hardcover stores one row per translation; we pick the one with max `users_count` per position to get the English canonical), and renders in position order with upcoming-release flags. Follow state lives in `user_data[uid]["followed_series"][sid] = {name, seeded: [book_ids], added_at}`; `seeded` is initialized to the full current book set so users only get notified about new entries. Daily job (`_daily_series_check`, 09:00 UTC) fetches each followed series and notifies the user about any book with `release_date <= today` that isn't in `seeded` yet, then adds it.
+
+**Token monitoring:** Hardcover JWT tokens have a ~1-year expiry. `bookbot/config.py:token_expiry_datetime()` decodes the `exp` claim client-side (no network). On startup, `app.py:_setup_token_monitoring` warns all `allowed_users` via Telegram if <30 days remain; a daily job at 09:30 UTC re-alerts if <14 days. `register_auth_failure_handler()` lets `config.py` notify on 401/403 or `invalid-jwt` GraphQL errors during normal API calls (1h cooldown to avoid spam).
 
 **Dependencies:** `python-telegram-bot`, `pyyaml`, `requests`
 
